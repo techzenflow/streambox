@@ -21,6 +21,7 @@ dependencies:
   media_kit_libs_windows_video: ^1.0.11
   media_kit_libs_linux: ^1.2.1
   shared_preferences: ^2.5.5
+  photo_manager: ^3.12.0
 
 dev_dependencies:
   flutter_test:

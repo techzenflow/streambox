@@ -100,7 +100,11 @@ jobs:
           RELEASE_TAG: ${{ steps.version.outputs.tag }}
           RELEASE_VERSION: ${{ steps.version.outputs.version }}
         run: |
-          release_notes="$(printf '## Streambox Beta %s\n\nAndroid preview build. The generated changelog below lists commits included in this version.\n' "$RELEASE_VERSION")"
+          change_notes="$(awk -v heading="### ${RELEASE_VERSION}" '$0 == heading { found=1; next } found && /^### / { exit } found { print }' CHANGELOG.md)"
+          if [[ -z "${change_notes//[[:space:]]/}" ]]; then
+            change_notes="See CHANGELOG.md for this beta's feature list."
+          fi
+          release_notes="$(printf '## Streambox Beta %s\n\nAndroid preview build.\n\n%s\n' "$RELEASE_VERSION" "$change_notes")"
           gh release create "$RELEASE_TAG" release-assets/*.apk \
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
@@ -187,7 +191,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          release_notes="$(printf '## Streambox %s\n\nStable Android release. The generated changelog below lists commits included in this version.\n' "$GITHUB_REF_NAME")"
+          release_version="${GITHUB_REF_NAME#v}"
+          change_notes="$(awk -v heading="### ${release_version}" '$0 == heading { found=1; next } found && /^### / { exit } found { print }' CHANGELOG.md)"
+          if [[ -z "${change_notes//[[:space:]]/}" ]]; then
+            change_notes="See CHANGELOG.md for the stable release notes."
+          fi
+          release_notes="$(printf '## Streambox %s\n\nStable Android release.\n\n%s\n' "$GITHUB_REF_NAME" "$change_notes")"
           gh release create "$GITHUB_REF_NAME" release-assets/*.apk \
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \

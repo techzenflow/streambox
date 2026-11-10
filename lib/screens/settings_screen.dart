@@ -44,8 +44,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
         _sectionTitle('播放'),
         _settingsCard([
           _switchRow(
-            title: '全屏时自动横屏',
-            subtitle: '进入全屏时旋转设备，退出后恢复竖屏',
+            title: '全屏按视频方向旋转',
+            subtitle: '横屏视频进入全屏时横屏，竖屏视频保持竖屏',
             icon: Icons.screen_rotation_alt_rounded,
             value: _settings.landscapeOnFullscreen,
             onChanged: (value) =>

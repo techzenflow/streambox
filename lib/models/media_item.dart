@@ -6,6 +6,10 @@ class MediaItem {
     required this.modified,
     this.isDirectory = false,
     this.isLocal = false,
+    this.assetId,
+    this.durationSeconds,
+    this.width,
+    this.height,
   });
 
   final String name;
@@ -14,6 +18,12 @@ class MediaItem {
   final DateTime? modified;
   final bool isDirectory;
   final bool isLocal;
+  final String? assetId;
+  final int? durationSeconds;
+  final int? width;
+  final int? height;
+
+  String get identity => assetId ?? url;
 
   String get extension =>
       name.contains('.') ? name.split('.').last.toLowerCase() : '';

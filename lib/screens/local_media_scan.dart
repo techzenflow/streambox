@@ -6,3 +6,6 @@ import 'local_media_scan_stub.dart'
 Future<List<MediaItem>> scanLocalMedia(String directoryPath) =>
     implementation.scanLocalMedia(directoryPath);
 
+Future<List<MediaItem>> scanDefaultLocalMedia() =>
+    implementation.scanDefaultLocalMedia();
+

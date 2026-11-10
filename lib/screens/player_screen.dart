@@ -11,6 +11,7 @@ import 'package:video_player/video_player.dart';
 
 import '../models/media_item.dart';
 import '../models/player_settings.dart';
+import '../services/device_video_scanner.dart';
 import '../services/local_video_controller.dart';
 
 const _green = Color(0xFFB9F36B);
@@ -44,6 +45,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
   BoxFit _fit = BoxFit.contain;
   bool _loading = true;
   bool _fullscreen = false;
+  bool _fullscreenLandscape = false;
   bool _controlsVisible = true;
   bool _locked = false;
   bool _handlingCompletion = false;
@@ -121,7 +123,13 @@ class _PlayerScreenState extends State<PlayerScreen> {
     VideoPlayerController? next;
     try {
       if (_item.isLocal && !kIsWeb) {
-        next = createLocalVideoController(_item.url);
+        final localPath = _item.assetId == null
+            ? _item.url
+            : await resolveDeviceVideo(_item.assetId!);
+        if (localPath == null || localPath.isEmpty) {
+          throw Exception('无法访问该视频，请检查媒体库权限后重新扫描');
+        }
+        next = createLocalVideoController(localPath);
       } else {
         next = VideoPlayerController.networkUrl(
           Uri.parse(_item.url),
@@ -189,11 +197,16 @@ class _PlayerScreenState extends State<PlayerScreen> {
       await _leaveFullscreen();
       return;
     }
-    if (_isMobilePlatform && widget.settings.landscapeOnFullscreen) {
-      await SystemChrome.setPreferredOrientations(const [
-        DeviceOrientation.landscapeLeft,
-        DeviceOrientation.landscapeRight,
-      ]);
+    final viewport = MediaQuery.sizeOf(context);
+    _fullscreenLandscape = widget.settings.landscapeOnFullscreen
+        ? _videoAspect >= 1
+        : viewport.width > viewport.height;
+    if (_isMobilePlatform) {
+      if (widget.settings.landscapeOnFullscreen) {
+        await _applyFullscreenOrientation(_fullscreenLandscape);
+      } else {
+        await SystemChrome.setPreferredOrientations(const []);
+      }
     }
     if (widget.settings.hideSystemUi) {
       await SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
@@ -208,7 +221,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
 
   Future<void> _leaveFullscreen() async {
     await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
-    if (_isMobilePlatform && widget.settings.landscapeOnFullscreen) {
+    if (_isMobilePlatform) {
       await SystemChrome.setPreferredOrientations(const [
         DeviceOrientation.portraitUp,
       ]);
@@ -219,6 +232,45 @@ class _PlayerScreenState extends State<PlayerScreen> {
       _controlsVisible = true;
     });
     _scheduleHide();
+  }
+
+  double get _videoAspect {
+    final videoSize = _controller?.value.size;
+    if (videoSize != null && videoSize.width > 0 && videoSize.height > 0) {
+      return videoSize.width / videoSize.height;
+    }
+    final width = _item.width;
+    final height = _item.height;
+    if (width != null && height != null && width > 0 && height > 0) {
+      return width / height;
+    }
+    return 16 / 9;
+  }
+
+  Future<void> _applyFullscreenOrientation(bool landscape) async {
+    await SystemChrome.setPreferredOrientations(
+      landscape
+          ? const [
+              DeviceOrientation.landscapeLeft,
+              DeviceOrientation.landscapeRight,
+            ]
+          : const [DeviceOrientation.portraitUp],
+    );
+  }
+
+  Future<void> _rotateFullscreen() async {
+    if (!_isMobilePlatform) return;
+    final nextLandscape = !_fullscreenLandscape;
+    await _applyFullscreenOrientation(nextLandscape);
+    if (!mounted) return;
+    setState(() => _fullscreenLandscape = nextLandscape);
+  }
+
+  double _inlinePlayerHeight(BuildContext context, double width) {
+    final screenHeight = MediaQuery.sizeOf(context).height;
+    final maxHeight = math.min(width * 1.15, screenHeight * .62);
+    final minHeight = math.min(190.0, maxHeight);
+    return (width / _videoAspect).clamp(minHeight, maxHeight).toDouble();
   }
 
   Future<void> _handleBack() async {
@@ -842,9 +894,12 @@ class _PlayerScreenState extends State<PlayerScreen> {
           top: false,
           child: Column(
             children: [
-              AspectRatio(
-                aspectRatio: 16 / 9,
-                child: _videoSurface(fullscreen: false),
+              LayoutBuilder(
+                builder: (context, constraints) => SizedBox(
+                  height: _inlinePlayerHeight(context, constraints.maxWidth),
+                  width: double.infinity,
+                  child: _videoSurface(fullscreen: false),
+                ),
               ),
               Expanded(child: _detailsPanel()),
             ],
@@ -1109,6 +1164,15 @@ class _PlayerScreenState extends State<PlayerScreen> {
               _subtitleName == null
                   ? Icons.subtitles_outlined
                   : Icons.subtitles_rounded,
+              color: Colors.white,
+            ),
+          ),
+        if (fullscreen && _isMobilePlatform)
+          IconButton(
+            tooltip: _fullscreenLandscape ? '切换竖屏' : '切换横屏',
+            onPressed: _rotateFullscreen,
+            icon: const Icon(
+              Icons.screen_rotation_alt_rounded,
               color: Colors.white,
             ),
           ),

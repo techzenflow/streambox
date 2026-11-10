@@ -4,7 +4,7 @@ A Flutter video player for watching videos stored on your device, with WebDAV as
 
 ## Features
 
-- Persistent local media library with multi-file import, search, video/audio filters, sorting, favorites, and file details.
+- Automatically scans the phone's video library, with paged loading, thumbnails, search, portrait/landscape filters, favorites, and file details.
 - Continue watching from saved positions, manage recent files, and play the next item or loop the current queue.
 - Player gestures for double-tap skipping, drag-to-seek, temporary 2x speed, and volume adjustment; configurable skip interval.
 - External SRT/VTT subtitles with timing adjustment and font sizing, plus speed (0.25x–4x), aspect ratio, queue controls, fullscreen landscape playback, and sleep timer.
@@ -12,7 +12,7 @@ A Flutter video player for watching videos stored on your device, with WebDAV as
 - Browse a WebDAV server and play supported video or audio files when you choose the optional WebDAV source.
 - Android, iOS, Windows, macOS, Linux, and Web targets. Playback support depends on the target platform and media format.
 
-The app uses `file_picker` to select local media and `video_player_media_kit` with the media_kit platform libraries to extend playback across desktop and mobile targets. Web playback uses a browser object URL for the selected file.
+The app uses `photo_manager` to scan mobile video libraries and `video_player_media_kit` with the media_kit platform libraries to extend playback across desktop and mobile targets. External subtitles can be selected from the player. Web playback uses a browser object URL for selected media.
 
 ## Run
 
@@ -44,5 +44,5 @@ For Web builds, the WebDAV server must allow cross-origin requests from the app 
 
 ## Current scope
 
-The local library uses the system file picker and can scan a selected folder on Windows, macOS, and Linux. Android and iOS use the system file picker to select videos; folder scanning is not available on mobile or in the Web build. External subtitle files are supported; embedded audio/subtitle track switching, picture-in-picture, and background playback are not included yet. WebDAV credentials remain in memory and are not saved.
+Android and iOS automatically scan the device video library after the user grants media access. Android's limited video selection is supported, and iOS users can expand their limited selection from the library screen. Windows, macOS, and Linux scan the default Videos/Movies and Downloads folders. The mobile player adapts its inline frame to the video's aspect ratio, enters fullscreen in the video's orientation, and offers a manual orientation toggle. Embedded audio/subtitle track switching, picture-in-picture, and background playback are not included yet. WebDAV credentials remain in memory and are not saved.
 

@@ -4,6 +4,13 @@ Beta builds and stable releases are tracked separately. A beta entry describes a
 
 ## Beta builds
 
+### 1.0.0-beta.7 — 2026-11-10
+
+- Replaced manual video importing on mobile with automatic device-library scanning, paged loading, thumbnails, and limited-permission support.
+- Simplified the home screen around the local video library, with search, favorites, portrait/landscape filters, recent playback, and optional WebDAV access.
+- Improved portrait and landscape playback: the inline player follows the video's aspect ratio, fullscreen follows the video's orientation, and a rotation control lets users switch orientation.
+- Added the beta's feature notes to its GitHub Release description.
+
 ### 1.0.0-beta.6 — 2026-11-10
 
 - Added a persistent local media library with multi-file import, search, video/audio filters, sorting, favorites, and media details.

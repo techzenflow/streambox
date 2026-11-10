@@ -4,6 +4,8 @@
 <dict>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>Streambox 需要访问视频媒体库以自动扫描并播放本地视频。</string>
 	<key>CFBundleDisplayName</key>
 	<string>Streambox</string>
 	<key>CFBundleExecutable</key>
@@ -47,3 +49,4 @@
 	<true/>
 </dict>
 </plist>
+
