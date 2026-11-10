@@ -47,8 +47,32 @@ jobs:
           echo "version=${beta_version}" >> "$GITHUB_OUTPUT"
           echo "tag=v${beta_version}" >> "$GITHUB_OUTPUT"
 
+      - name: Configure Android release signing
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          test -n "$ANDROID_KEYSTORE_BASE64"
+          test -n "$ANDROID_KEYSTORE_PASSWORD"
+          test -n "$ANDROID_KEY_ALIAS"
+          test -n "$ANDROID_KEY_PASSWORD"
+          echo "$ANDROID_KEYSTORE_BASE64" | base64 --decode > android/app/streambox-release-key.jks
+          cat > android/key.properties <<EOF
+          storeFile=app/streambox-release-key.jks
+          storePassword=${ANDROID_KEYSTORE_PASSWORD}
+          keyAlias=${ANDROID_KEY_ALIAS}
+          keyPassword=${ANDROID_KEY_PASSWORD}
+          EOF
+
       - name: Build beta APK
-        run: flutter build apk --release --split-per-abi --build-name='${{ steps.version.outputs.version }}' --build-number='${{ github.run_number }}'
+        run: |
+          flutter build apk --release --split-per-abi --build-name='${{ steps.version.outputs.version }}' --build-number='${{ github.run_number }}'
+          mkdir -p release-assets
+          cp build/app/outputs/flutter-apk/app-*-release.apk release-assets/
+          flutter build apk --release --build-name='${{ steps.version.outputs.version }}' --build-number='${{ github.run_number }}'
+          cp build/app/outputs/flutter-apk/app-release.apk release-assets/
 
       - name: Publish beta pre-release
         env:
@@ -57,7 +81,7 @@ jobs:
           RELEASE_VERSION: ${{ steps.version.outputs.version }}
         run: |
           release_notes="$(printf '## Streambox Beta %s\n\nThis is a preview build for testing. It is published separately from stable releases.\n\nThe generated changelog below lists the commits included in this build.\n' "$RELEASE_VERSION")"
-          gh release create "$RELEASE_TAG" build/app/outputs/flutter-apk/*.apk \
+          gh release create "$RELEASE_TAG" release-assets/*.apk \
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
             --title "Streambox ${RELEASE_VERSION} (Beta)" \
@@ -101,15 +125,39 @@ jobs:
             exit 1
           fi
 
+      - name: Configure Android release signing
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          test -n "$ANDROID_KEYSTORE_BASE64"
+          test -n "$ANDROID_KEYSTORE_PASSWORD"
+          test -n "$ANDROID_KEY_ALIAS"
+          test -n "$ANDROID_KEY_PASSWORD"
+          echo "$ANDROID_KEYSTORE_BASE64" | base64 --decode > android/app/streambox-release-key.jks
+          cat > android/key.properties <<EOF
+          storeFile=app/streambox-release-key.jks
+          storePassword=${ANDROID_KEYSTORE_PASSWORD}
+          keyAlias=${ANDROID_KEY_ALIAS}
+          keyPassword=${ANDROID_KEY_PASSWORD}
+          EOF
+
       - name: Build stable APK
-        run: flutter build apk --release --split-per-abi --build-name="${GITHUB_REF_NAME#v}" --build-number='${{ github.run_number }}'
+        run: |
+          flutter build apk --release --split-per-abi --build-name="${GITHUB_REF_NAME#v}" --build-number='${{ github.run_number }}'
+          mkdir -p release-assets
+          cp build/app/outputs/flutter-apk/app-*-release.apk release-assets/
+          flutter build apk --release --build-name="${GITHUB_REF_NAME#v}" --build-number='${{ github.run_number }}'
+          cp build/app/outputs/flutter-apk/app-release.apk release-assets/
 
       - name: Publish stable release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           release_notes="$(printf '## Streambox %s\n\nStable Android release. The generated changelog below lists the commits included in this version.\n' "$GITHUB_REF_NAME")"
-          gh release create "$GITHUB_REF_NAME" build/app/outputs/flutter-apk/*.apk \
+          gh release create "$GITHUB_REF_NAME" release-assets/*.apk \
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
             --title "Streambox $GITHUB_REF_NAME" \

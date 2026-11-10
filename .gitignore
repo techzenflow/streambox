@@ -43,3 +43,7 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+/android/app/streambox-release-key.jks
+/android/key.properties
+/android/.signing-secret.tmp
+/.release-tools/

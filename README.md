@@ -22,9 +22,13 @@ Flutter runner projects are included for Android, iOS, Web, Windows, macOS, and 
 ## Releases
 
 - Every push to `main` builds Android APKs and publishes a versioned GitHub **pre-release**, such as `v1.0.0-beta.12`, with generated notes and a changelog.
-- Android beta and stable releases provide separate APKs for supported CPU architectures.
+- Android beta and stable releases provide one universal APK plus APKs for individual CPU architectures. Use the universal APK if you are unsure which architecture to choose.
 - A stable Android release is published by pushing a version tag such as `v1.0.0`. Stable releases remain separate from beta releases.
 - Download builds from [GitHub Releases](https://github.com/techzenflow/streambox/releases).
+
+GitHub Actions signs each release with a persistent Android release key stored in repository Actions Secrets (`ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, and `ANDROID_KEY_PASSWORD`) so future versions can update an existing installation.
+
+The first release that uses this persistent key cannot update older beta installations, which were signed with temporary build keys. Uninstall an older beta once before installing the first persistently signed release; updates after that will install normally.
 
 The APK version matches its release tag (without the leading `v`), and its Android build number is the GitHub Actions run number.
 
