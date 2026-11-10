@@ -1,4 +1,4 @@
-name: Android releases
+name: Android builds and releases
 
 on:
   push:
@@ -6,13 +6,17 @@ on:
       - main
     tags:
       - 'v*'
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
   beta:
-    if: github.ref == 'refs/heads/main'
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -47,17 +51,20 @@ jobs:
           echo "version=${beta_version}" >> "$GITHUB_OUTPUT"
           echo "tag=v${beta_version}" >> "$GITHUB_OUTPUT"
 
-      - name: Configure Android release signing
+      - name: Configure Android release signing when available
+        id: signing
+        shell: bash
         env:
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
-          test -n "$ANDROID_KEYSTORE_BASE64"
-          test -n "$ANDROID_KEYSTORE_PASSWORD"
-          test -n "$ANDROID_KEY_ALIAS"
-          test -n "$ANDROID_KEY_PASSWORD"
+          if [[ -z "$ANDROID_KEYSTORE_BASE64" || -z "$ANDROID_KEYSTORE_PASSWORD" || -z "$ANDROID_KEY_ALIAS" || -z "$ANDROID_KEY_PASSWORD" ]]; then
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Android signing secrets are not configured. The APK artifact will use the debug key and will not be published as a GitHub Release."
+            exit 0
+          fi
           echo "$ANDROID_KEYSTORE_BASE64" | base64 --decode > android/app/streambox-release-key.jks
           cat > android/key.properties <<EOF
           storeFile=app/streambox-release-key.jks
@@ -65,22 +72,35 @@ jobs:
           keyAlias=${ANDROID_KEY_ALIAS}
           keyPassword=${ANDROID_KEY_PASSWORD}
           EOF
+          echo "configured=true" >> "$GITHUB_OUTPUT"
 
-      - name: Build beta APK
+      - name: Build beta APKs
+        env:
+          BUILD_NAME: ${{ steps.version.outputs.version }}
+          BUILD_NUMBER: ${{ github.run_number }}
         run: |
-          flutter build apk --release --split-per-abi --build-name='${{ steps.version.outputs.version }}' --build-number='${{ github.run_number }}'
           mkdir -p release-assets
+          flutter build apk --release --split-per-abi --build-name="$BUILD_NAME" --build-number="$BUILD_NUMBER"
           cp build/app/outputs/flutter-apk/app-*-release.apk release-assets/
-          flutter build apk --release --build-name='${{ steps.version.outputs.version }}' --build-number='${{ github.run_number }}'
-          cp build/app/outputs/flutter-apk/app-release.apk release-assets/
+          flutter build apk --release --build-name="$BUILD_NAME" --build-number="$BUILD_NUMBER"
+          cp build/app/outputs/flutter-apk/app-release.apk release-assets/streambox-universal.apk
+
+      - name: Upload beta build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: streambox-${{ steps.version.outputs.version }}-android-apks
+          path: release-assets/*.apk
+          if-no-files-found: error
+          retention-days: 30
 
       - name: Publish beta pre-release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.signing.outputs.configured == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ steps.version.outputs.tag }}
           RELEASE_VERSION: ${{ steps.version.outputs.version }}
         run: |
-          release_notes="$(printf '## Streambox Beta %s\n\nThis is a preview build for testing. It is published separately from stable releases.\n\nThe generated changelog below lists the commits included in this build.\n' "$RELEASE_VERSION")"
+          release_notes="$(printf '## Streambox Beta %s\n\nAndroid preview build. The generated changelog below lists commits included in this version.\n' "$RELEASE_VERSION")"
           gh release create "$RELEASE_TAG" release-assets/*.apk \
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
@@ -88,6 +108,13 @@ jobs:
             --notes "$release_notes" \
             --generate-notes \
             --prerelease
+
+      - name: Explain debug-signed artifact
+        if: steps.signing.outputs.configured != 'true'
+        run: |
+          echo "### Beta APK artifact" >> "$GITHUB_STEP_SUMMARY"
+          echo "The APK was compiled and uploaded as a workflow artifact, signed with the Android debug key, because release signing secrets are not configured." >> "$GITHUB_STEP_SUMMARY"
+          echo "It cannot update an APK signed with the persistent release key. Configure the existing release key in Actions Secrets before publishing an installable beta release." >> "$GITHUB_STEP_SUMMARY"
 
   stable:
     if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref, '-beta.')
@@ -144,22 +171,27 @@ jobs:
           keyPassword=${ANDROID_KEY_PASSWORD}
           EOF
 
-      - name: Build stable APK
+      - name: Build stable APKs
+        env:
+          BUILD_NAME: ${{ github.ref_name }}
+          BUILD_NUMBER: ${{ github.run_number }}
         run: |
-          flutter build apk --release --split-per-abi --build-name="${GITHUB_REF_NAME#v}" --build-number='${{ github.run_number }}'
+          BUILD_NAME="${BUILD_NAME#v}"
           mkdir -p release-assets
+          flutter build apk --release --split-per-abi --build-name="$BUILD_NAME" --build-number="$BUILD_NUMBER"
           cp build/app/outputs/flutter-apk/app-*-release.apk release-assets/
-          flutter build apk --release --build-name="${GITHUB_REF_NAME#v}" --build-number='${{ github.run_number }}'
-          cp build/app/outputs/flutter-apk/app-release.apk release-assets/
+          flutter build apk --release --build-name="$BUILD_NAME" --build-number="$BUILD_NUMBER"
+          cp build/app/outputs/flutter-apk/app-release.apk release-assets/streambox-universal.apk
 
       - name: Publish stable release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          release_notes="$(printf '## Streambox %s\n\nStable Android release. The generated changelog below lists the commits included in this version.\n' "$GITHUB_REF_NAME")"
+          release_notes="$(printf '## Streambox %s\n\nStable Android release. The generated changelog below lists commits included in this version.\n' "$GITHUB_REF_NAME")"
           gh release create "$GITHUB_REF_NAME" release-assets/*.apk \
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
             --title "Streambox $GITHUB_REF_NAME" \
             --notes "$release_notes" \
             --generate-notes
+

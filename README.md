@@ -4,8 +4,11 @@ A Flutter video player for watching videos stored on your device, with WebDAV as
 
 ## Features
 
-- Pick and play local video files. Recently opened files are listed for the current session.
-- Browse a WebDAV server and play supported video or audio files when you choose the WebDAV source.
+- Mobile-first home screen for opening and playing local video files.
+- Select multiple videos to create a playback queue, scan a local folder, and reopen recent files.
+- Player controls for seeking, 10-second jumps, speed (0.25x–4x), aspect ratio, queue navigation, and immersive landscape playback.
+- Settings for fullscreen rotation, hiding system bars, auto-hiding controls, default speed, and local playback history.
+- Browse a WebDAV server and play supported video or audio files when you choose the optional WebDAV source.
 - Android, iOS, Windows, macOS, Linux, and Web targets. Playback support depends on the target platform and media format.
 
 The app uses `file_picker` to select local media and `video_player_media_kit` with the media_kit platform libraries to extend playback across desktop and mobile targets. Web playback uses a browser object URL for the selected file.
@@ -40,4 +43,5 @@ For Web builds, the WebDAV server must allow cross-origin requests from the app 
 
 ## Current scope
 
-Play local video and browse/play common video and audio formats from WebDAV. Playlists, subtitle tracks, background playback, and persistent WebDAV profiles are not included yet.
+The local library uses the system file picker and can scan a selected folder on Windows, macOS, and Linux. Android and iOS use the system file picker to select videos. Folder scanning is not available on mobile or in the Web build. WebDAV credentials remain in memory and are not saved. Subtitle and audio track selection, picture-in-picture, and background playback are not included yet.
+

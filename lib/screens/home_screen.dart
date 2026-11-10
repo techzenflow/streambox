@@ -3,11 +3,14 @@ import 'dart:convert';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:video_player/video_player.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/media_item.dart';
-import '../services/local_video_controller.dart';
-import '../services/webdav_service.dart';
+import '../models/player_settings.dart';
+import 'local_media_scan.dart';
+import 'player_screen.dart';
+import 'settings_screen.dart';
+import 'webdav_screen.dart';
 
 const _green = Color(0xFFB9F36B);
 const _ink = Color(0xFF19251F);
@@ -20,882 +23,616 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> {
-  final _url = TextEditingController();
-  final _user = TextEditingController();
-  final _pass = TextEditingController();
+  static const _historyKey = 'streambox.localHistory';
 
-  String _source = 'local';
-  String _path = '/';
-  String _filter = '全部';
-  WebDavService? _service;
-  List<MediaItem> _webDavItems = [];
-  final List<MediaItem> _recentLocal = [];
-  MediaItem? _playing;
-  VideoPlayerController? _player;
-  bool _loading = false;
-  String? _error;
+  int _tab = 0;
+  bool _loading = true;
+  bool _scanning = false;
+  PlayerSettings _settings = const PlayerSettings();
+  List<MediaItem> _recent = [];
+
+  bool get _supportsFolderScan =>
+      !kIsWeb &&
+      (defaultTargetPlatform == TargetPlatform.windows ||
+          defaultTargetPlatform == TargetPlatform.macOS ||
+          defaultTargetPlatform == TargetPlatform.linux);
 
   @override
-  void dispose() {
-    _url.dispose();
-    _user.dispose();
-    _pass.dispose();
-    _player?.dispose();
-    super.dispose();
+  void initState() {
+    super.initState();
+    _loadSavedData();
   }
 
-  Future<void> _pickLocalVideo() async {
+  Future<void> _loadSavedData() async {
     try {
-      final file = await FilePicker.pickFile(type: FileType.video);
-      if (file == null) return;
-
-      final path = kIsWeb ? file.uri.toString() : file.path;
-      if (path == null || path.isEmpty) {
-        _showMessage('无法读取这个视频文件');
-        return;
-      }
-
-      final item = MediaItem(
-        name: file.name,
-        url: path,
-        size: 0,
-        modified: null,
-        isLocal: true,
-      );
+      final prefs = await SharedPreferences.getInstance();
+      final settings = await PlayerSettings.load();
+      final raw = prefs.getString(_historyKey);
+      final decoded = raw == null ? <dynamic>[] : jsonDecode(raw) as List;
+      final recent = decoded
+          .whereType<Map>()
+          .map(
+            (entry) => MediaItem(
+              name: entry['name'] as String? ?? '视频',
+              url: entry['url'] as String? ?? '',
+              size: entry['size'] as int? ?? 0,
+              modified: null,
+              isLocal: true,
+            ),
+          )
+          .where((item) => item.url.isNotEmpty)
+          .toList();
+      if (!settings.saveHistory) recent.clear();
+      if (!mounted) return;
       setState(() {
-        _source = 'local';
-        _recentLocal.removeWhere((recent) => recent.url == item.url);
-        _recentLocal.insert(0, item);
-        _error = null;
+        _settings = settings;
+        _recent = recent;
+        _loading = false;
       });
-      await _play(item);
-    } catch (error) {
-      if (mounted) _showMessage('打开视频失败：${_friendlyError(error)}');
+    } catch (_) {
+      if (mounted) setState(() => _loading = false);
     }
   }
 
-  Future<void> _play(MediaItem item) async {
-    if (item.isDirectory) {
-      await _browse(item);
+  Future<void> _saveHistory() async {
+    final prefs = await SharedPreferences.getInstance();
+    if (!_settings.saveHistory || kIsWeb) {
+      await prefs.remove(_historyKey);
       return;
     }
-    if (!item.isMedia) {
-      _showMessage('暂不支持此文件格式');
-      return;
-    }
+    final value = _recent
+        .map((item) => {'name': item.name, 'url': item.url, 'size': item.size})
+        .toList();
+    await prefs.setString(_historyKey, jsonEncode(value));
+  }
 
-    final oldPlayer = _player;
-    setState(() {
-      _playing = item;
-      _player = null;
-      _error = null;
-    });
-    await oldPlayer?.dispose();
-
-    VideoPlayerController? controller;
+  Future<void> _openVideos() async {
     try {
-      if (item.isLocal && !kIsWeb) {
-        controller = createLocalVideoController(item.url);
-      } else {
-        final headers = <String, String>{};
-        if (!item.isLocal && (_user.text.isNotEmpty || _pass.text.isNotEmpty)) {
-          headers['Authorization'] =
-              'Basic ${base64Encode(utf8.encode('${_user.text}:${_pass.text}'))}';
-        }
-        controller = VideoPlayerController.networkUrl(
-          Uri.parse(item.url),
-          httpHeaders: headers,
+      final files = await FilePicker.pickFiles(
+        dialogTitle: '选择视频文件',
+        type: FileType.custom,
+        allowedExtensions: const [
+          'mp4',
+          'm4v',
+          'mkv',
+          'mov',
+          'webm',
+          'avi',
+          'mpg',
+          'mpeg',
+          '3gp',
+          'ts',
+          'm2ts',
+          'flv',
+          'wmv',
+          'ogv',
+        ],
+      );
+      if (files.isEmpty) return;
+      final items = <MediaItem>[];
+      for (final file in files) {
+        final path = kIsWeb ? file.uri.toString() : file.path;
+        if (path == null || path.isEmpty) continue;
+        items.add(
+          MediaItem(
+            name: file.name,
+            url: path,
+            size: await file.length() ?? 0,
+            modified: null,
+            isLocal: true,
+          ),
         );
       }
-      await controller.initialize();
-      await controller.play();
-      if (mounted) setState(() => _player = controller);
+      if (items.isEmpty) {
+        _message('读取文件失败，请重新选择');
+        return;
+      }
+      await _remember(items);
+      await _launchPlayer(items, 0);
     } catch (error) {
-      await controller?.dispose();
-      if (!mounted) return;
-      setState(() {
-        _playing = null;
-        _error = '无法播放此文件：${_friendlyError(error)}';
-      });
+      if (mounted) _message('打开视频失败：${_friendlyError(error)}');
     }
   }
 
-  Future<void> _connect() async {
-    if (_url.text.trim().isEmpty) {
-      _showMessage('请输入 WebDAV 地址');
+  Future<void> _scanFolder() async {
+    if (!_supportsFolderScan) {
+      _message('请使用“打开视频”选择本地文件');
       return;
     }
-    setState(() {
-      _loading = true;
-      _error = null;
-      _path = '/';
-    });
     try {
-      final service = WebDavService(
-        baseUrl: _url.text.trim(),
-        username: _user.text,
-        password: _pass.text,
-      );
-      final items = await service.list('/');
+      final path = await FilePicker.getDirectoryPath(dialogTitle: '选择视频文件夹');
+      if (path == null || path.isEmpty) return;
+      setState(() => _scanning = true);
+      final found = await scanLocalMedia(path);
       if (!mounted) return;
-      setState(() {
-        _service = service;
-        _webDavItems = items;
-      });
+      if (found.isEmpty) {
+        _message('这个文件夹中没有找到支持的视频');
+        return;
+      }
+      await _remember(found);
+      await _launchPlayer(found, 0);
     } catch (error) {
-      if (mounted) setState(() => _error = _friendlyError(error));
+      if (mounted) _message('扫描文件夹失败：${_friendlyError(error)}');
     } finally {
-      if (mounted) setState(() => _loading = false);
+      if (mounted) setState(() => _scanning = false);
     }
   }
 
-  Future<void> _browse(MediaItem folder) async {
-    if (_service == null) return;
-    final next = '$_path${_path.endsWith('/') ? '' : '/'}${folder.name}/';
-    await _loadWebDavPath(next);
+  Future<void> _remember(List<MediaItem> items) async {
+    final next = [...items, ..._recent];
+    final unique = <String>{};
+    _recent = next.where((item) => unique.add(item.url)).take(60).toList();
+    if (mounted) setState(() {});
+    await _saveHistory();
   }
 
-  Future<void> _back() async {
-    if (_path == '/') return;
-    final parts = _path.split('/')..removeWhere((part) => part.isEmpty);
-    if (parts.isNotEmpty) parts.removeLast();
-    final next = parts.isEmpty ? '/' : '/${parts.join('/')}/';
-    await _loadWebDavPath(next);
+  Future<void> _openRecent(MediaItem item) async {
+    final index = _recent.indexWhere((candidate) => candidate.url == item.url);
+    await _launchPlayer(_recent, index < 0 ? 0 : index);
   }
 
-  Future<void> _loadWebDavPath(String path) async {
-    if (_service == null) return;
-    setState(() {
-      _loading = true;
-      _error = null;
-    });
-    try {
-      final items = await _service!.list(path);
-      if (!mounted) return;
-      setState(() {
-        _path = path;
-        _webDavItems = items;
-      });
-    } catch (error) {
-      if (mounted) setState(() => _error = _friendlyError(error));
-    } finally {
-      if (mounted) setState(() => _loading = false);
-    }
-  }
-
-  List<MediaItem> get _visibleWebDavItems {
-    final items = _webDavItems
-        .where((item) => item.isDirectory || item.isMedia)
-        .toList();
-    if (_filter == '视频') {
-      return items.where((item) => item.isDirectory || item.isVideo).toList();
-    }
-    if (_filter == '音频') {
-      return items.where((item) => item.isDirectory || item.isAudio).toList();
-    }
-    return items;
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final wide = MediaQuery.sizeOf(context).width >= 900;
-    return Scaffold(
-      body: SafeArea(
-        child: Column(
-          children: [
-            _header(),
-            Expanded(
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(24, 6, 24, 24),
-                child: wide
-                    ? Row(
-                        crossAxisAlignment: CrossAxisAlignment.stretch,
-                        children: [
-                          SizedBox(width: 350, child: _libraryPanel()),
-                          const SizedBox(width: 18),
-                          Expanded(child: _playerPanel()),
-                        ],
-                      )
-                    : Column(
-                        children: [
-                          Expanded(flex: 3, child: _playerPanel()),
-                          const SizedBox(height: 12),
-                          Expanded(flex: 2, child: _libraryPanel()),
-                        ],
-                      ),
-              ),
-            ),
-          ],
+  Future<void> _launchPlayer(
+    List<MediaItem> queue,
+    int index, {
+    Map<String, String> headers = const {},
+  }) async {
+    if (queue.isEmpty) return;
+    await Navigator.of(context).push<void>(
+      MaterialPageRoute(
+        builder: (_) => PlayerScreen(
+          queue: List<MediaItem>.unmodifiable(queue),
+          initialIndex: index,
+          settings: _settings,
+          headers: headers,
         ),
       ),
     );
   }
 
-  Widget _header() => Padding(
-        padding: const EdgeInsets.fromLTRB(26, 20, 26, 16),
-        child: Row(
+  Future<void> _loadSettingsOnly() async {
+    final settings = await PlayerSettings.load();
+    if (!mounted) return;
+    setState(() {
+      _settings = settings;
+      if (!settings.saveHistory) _recent = [];
+    });
+    if (!settings.saveHistory) await _saveHistory();
+  }
+
+  Future<void> _clearHistory() async {
+    setState(() => _recent.clear());
+    await _saveHistory();
+  }
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+    backgroundColor: const Color(0xFFF5F5F0),
+    body: _tab == 0
+        ? _homePage()
+        : SettingsScreen(
+            initialSettings: _settings,
+            onChanged: (settings) {
+              setState(() {
+                _settings = settings;
+                if (!settings.saveHistory) _recent = [];
+              });
+              if (!settings.saveHistory) _saveHistory();
+            },
+          ),
+    bottomNavigationBar: NavigationBar(
+      selectedIndex: _tab,
+      backgroundColor: Colors.white,
+      indicatorColor: _green.withValues(alpha: .55),
+      onDestinationSelected: (index) async {
+        setState(() => _tab = index);
+        if (index == 1) await _loadSettingsOnly();
+      },
+      destinations: const [
+        NavigationDestination(
+          icon: Icon(Icons.video_library_outlined),
+          selectedIcon: Icon(Icons.video_library_rounded),
+          label: '视频',
+        ),
+        NavigationDestination(icon: Icon(Icons.tune_rounded), label: '设置'),
+      ],
+    ),
+  );
+
+  Widget _homePage() => SafeArea(
+    child: Center(
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 760),
+        child: CustomScrollView(
+          slivers: [
+            SliverPadding(
+              padding: const EdgeInsets.fromLTRB(20, 10, 20, 24),
+              sliver: SliverList.list(
+                children: [
+                  _header(),
+                  const SizedBox(height: 23),
+                  _heroCard(),
+                  const SizedBox(height: 24),
+                  _quickActions(),
+                  const SizedBox(height: 30),
+                  _recentHeader(),
+                  const SizedBox(height: 10),
+                  if (_loading)
+                    const Padding(
+                      padding: EdgeInsets.symmetric(vertical: 40),
+                      child: Center(
+                        child: CircularProgressIndicator(color: _ink),
+                      ),
+                    )
+                  else if (_recent.isEmpty)
+                    _emptyHistory()
+                  else
+                    ..._recent.take(12).map(_recentRow),
+                  const SizedBox(height: 22),
+                  _webDavCard(),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    ),
+  );
+
+  Widget _header() => Row(
+    children: [
+      Container(
+        width: 42,
+        height: 42,
+        decoration: BoxDecoration(
+          color: _green,
+          borderRadius: BorderRadius.circular(14),
+        ),
+        child: const Icon(Icons.play_arrow_rounded, color: _ink, size: 28),
+      ),
+      const SizedBox(width: 11),
+      const Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'streambox',
+            style: TextStyle(
+              color: _ink,
+              fontSize: 20,
+              fontWeight: FontWeight.w900,
+              letterSpacing: -.7,
+            ),
+          ),
+          SizedBox(height: 1),
+          Text(
+            'VIDEO PLAYER',
+            style: TextStyle(
+              color: Color(0xFF8C948A),
+              fontSize: 8,
+              letterSpacing: 1.4,
+              fontWeight: FontWeight.w800,
+            ),
+          ),
+        ],
+      ),
+      const Spacer(),
+      IconButton.filledTonal(
+        tooltip: '设置',
+        onPressed: () async {
+          setState(() => _tab = 1);
+          await _loadSettingsOnly();
+        },
+        style: IconButton.styleFrom(
+          backgroundColor: Colors.white,
+          foregroundColor: _ink,
+        ),
+        icon: const Icon(Icons.tune_rounded),
+      ),
+    ],
+  );
+
+  Widget _heroCard() => Container(
+    padding: const EdgeInsets.fromLTRB(20, 22, 20, 20),
+    decoration: BoxDecoration(
+      color: _ink,
+      borderRadius: BorderRadius.circular(25),
+      gradient: const LinearGradient(
+        colors: [Color(0xFF202E26), Color(0xFF111A15)],
+        begin: Alignment.topLeft,
+        end: Alignment.bottomRight,
+      ),
+    ),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
           children: [
             Container(
               width: 38,
               height: 38,
               decoration: BoxDecoration(
-                color: _green,
-                borderRadius: BorderRadius.circular(13),
+                color: _green.withValues(alpha: .14),
+                borderRadius: BorderRadius.circular(12),
               ),
-              child: const Icon(Icons.play_arrow_rounded, color: _ink, size: 27),
+              child: const Icon(
+                Icons.folder_open_rounded,
+                color: _green,
+                size: 21,
+              ),
             ),
             const SizedBox(width: 11),
             const Text(
-              'streambox',
+              '从设备中打开',
               style: TextStyle(
-                fontSize: 21,
-                fontWeight: FontWeight.w800,
-                letterSpacing: -.7,
-                color: _ink,
-              ),
-            ),
-            const Spacer(),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-              decoration: BoxDecoration(
                 color: Colors.white,
-                borderRadius: BorderRadius.circular(30),
-              ),
-              child: const Row(
-                children: [
-                  Icon(Icons.folder_open_rounded, size: 15),
-                  SizedBox(width: 7),
-                  Text(
-                    'LOCAL VIDEO PLAYER',
-                    style: TextStyle(
-                      fontSize: 9,
-                      fontWeight: FontWeight.w800,
-                      letterSpacing: 1.1,
-                    ),
-                  ),
-                ],
+                fontSize: 16,
+                fontWeight: FontWeight.w800,
               ),
             ),
           ],
         ),
-      );
-
-  Widget _libraryPanel() => Container(
-        decoration: BoxDecoration(
-          color: Colors.white,
-          borderRadius: BorderRadius.circular(25),
+        const SizedBox(height: 11),
+        const Text(
+          '选择一个视频，或一次添加多个文件组成播放队列。',
+          style: TextStyle(color: Colors.white60, fontSize: 11),
         ),
-        padding: const EdgeInsets.all(20),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                const Text(
-                  '媒体库',
-                  style: TextStyle(
-                    fontSize: 20,
-                    fontWeight: FontWeight.w800,
-                    color: _ink,
-                  ),
-                ),
-                const Spacer(),
-                if (_source == 'webdav' && _service != null)
-                  IconButton(
-                    tooltip: '刷新',
-                    onPressed: _connect,
-                    icon: const Icon(Icons.refresh_rounded, size: 20),
-                  ),
-              ],
-            ),
-            const SizedBox(height: 12),
-            _sourceSwitcher(),
-            const SizedBox(height: 16),
-            if (_error != null)
-              Padding(
-                padding: const EdgeInsets.only(bottom: 10),
-                child: Text(
-                  _error!,
-                  style: const TextStyle(
-                    fontSize: 12,
-                    color: Color(0xFFB54736),
-                  ),
-                ),
-              ),
-            Expanded(
-              child: _source == 'local' ? _localLibrary() : _webDavLibrary(),
-            ),
-          ],
-        ),
-      );
-
-  Widget _sourceSwitcher() => Row(
-        children: [
-          Expanded(child: _sourceButton('local', '本地视频', Icons.folder_rounded)),
-          const SizedBox(width: 8),
-          Expanded(child: _sourceButton('webdav', 'WebDAV', Icons.cloud_outlined)),
-        ],
-      );
-
-  Widget _sourceButton(String source, String label, IconData icon) {
-    final selected = _source == source;
-    return InkWell(
-      onTap: () => setState(() {
-        _source = source;
-        _error = null;
-      }),
-      borderRadius: BorderRadius.circular(14),
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 160),
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 11),
-        decoration: BoxDecoration(
-          color: selected ? _ink : const Color(0xFFF4F5F0),
-          borderRadius: BorderRadius.circular(14),
-        ),
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(icon, size: 16, color: selected ? _green : _ink),
-            const SizedBox(width: 7),
-            Text(
-              label,
-              style: TextStyle(
-                fontSize: 11,
-                fontWeight: FontWeight.w700,
-                color: selected ? Colors.white : _ink,
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _localLibrary() => Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          FilledButton.icon(
-            onPressed: _pickLocalVideo,
+        const SizedBox(height: 19),
+        SizedBox(
+          width: double.infinity,
+          child: FilledButton.icon(
+            onPressed: _loading ? null : _openVideos,
             icon: const Icon(Icons.video_file_outlined, size: 19),
-            label: const Text('打开本地视频'),
+            label: const Text('打开视频'),
             style: FilledButton.styleFrom(
-              backgroundColor: _ink,
-              foregroundColor: Colors.white,
+              backgroundColor: _green,
+              foregroundColor: _ink,
               padding: const EdgeInsets.symmetric(vertical: 15),
               shape: RoundedRectangleBorder(
                 borderRadius: BorderRadius.circular(15),
               ),
+              textStyle: const TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.w800,
+              ),
             ),
           ),
-          const SizedBox(height: 19),
-          Row(
+        ),
+      ],
+    ),
+  );
+
+  Widget _quickActions() => Row(
+    children: [
+      Expanded(
+        child: _quickAction(
+          icon: _supportsFolderScan
+              ? Icons.folder_copy_outlined
+              : Icons.video_file_outlined,
+          label: _supportsFolderScan
+              ? _scanning
+                    ? '正在扫描…'
+                    : '扫描文件夹'
+              : '浏览本地文件',
+          onPressed: _supportsFolderScan
+              ? (_scanning ? null : _scanFolder)
+              : _openVideos,
+        ),
+      ),
+      const SizedBox(width: 11),
+      Expanded(
+        child: _quickAction(
+          icon: Icons.cloud_outlined,
+          label: 'WebDAV',
+          onPressed: () async {
+            final result = await Navigator.of(context).push<WebDavPlayback>(
+              MaterialPageRoute(builder: (_) => const WebDavScreen()),
+            );
+            if (result != null) {
+              await _launchPlayer(
+                result.queue,
+                result.index,
+                headers: result.headers,
+              );
+            }
+          },
+        ),
+      ),
+    ],
+  );
+
+  Widget _quickAction({
+    required IconData icon,
+    required String label,
+    required VoidCallback? onPressed,
+  }) => OutlinedButton.icon(
+    onPressed: onPressed,
+    icon: Icon(icon, size: 17),
+    label: Text(label),
+    style: OutlinedButton.styleFrom(
+      foregroundColor: _ink,
+      backgroundColor: Colors.white,
+      side: BorderSide.none,
+      padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 10),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
+      textStyle: const TextStyle(fontSize: 11, fontWeight: FontWeight.w700),
+    ),
+  );
+
+  Widget _recentHeader() => Row(
+    children: [
+      const Text(
+        '最近播放',
+        style: TextStyle(
+          color: _ink,
+          fontSize: 16,
+          fontWeight: FontWeight.w800,
+        ),
+      ),
+      const SizedBox(width: 7),
+      Text(
+        '${_recent.length}',
+        style: const TextStyle(color: Color(0xFF8A9288), fontSize: 11),
+      ),
+      const Spacer(),
+      if (_recent.isNotEmpty)
+        TextButton(
+          onPressed: _clearHistory,
+          style: TextButton.styleFrom(foregroundColor: _ink),
+          child: const Text('清空', style: TextStyle(fontSize: 11)),
+        ),
+    ],
+  );
+
+  Widget _recentRow(MediaItem item) => Padding(
+    padding: const EdgeInsets.only(bottom: 6),
+    child: Material(
+      color: Colors.white,
+      borderRadius: BorderRadius.circular(16),
+      child: InkWell(
+        onTap: () => _openRecent(item),
+        borderRadius: BorderRadius.circular(16),
+        child: Padding(
+          padding: const EdgeInsets.all(11),
+          child: Row(
             children: [
-              const Text(
-                '最近打开',
-                style: TextStyle(
-                  fontSize: 12,
-                  fontWeight: FontWeight.w800,
-                  color: _ink,
+              Container(
+                width: 46,
+                height: 46,
+                decoration: BoxDecoration(
+                  color: const Color(0xFFF0F4EA),
+                  borderRadius: BorderRadius.circular(13),
+                ),
+                child: const Icon(
+                  Icons.movie_outlined,
+                  color: Color(0xFF617E48),
+                  size: 22,
                 ),
               ),
-              const Spacer(),
-              Text(
-                '本次会话 ${_recentLocal.length}',
-                style: TextStyle(
-                  fontSize: 10,
-                  color: Colors.black.withValues(alpha: .4),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      item.name,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: _ink,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      '${item.extension.toUpperCase()} · ${item.prettySize}',
+                      style: const TextStyle(
+                        color: Color(0xFF8A9288),
+                        fontSize: 10,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 6),
+              IconButton(
+                tooltip: '从记录中移除',
+                onPressed: () => _removeRecent(item),
+                visualDensity: VisualDensity.compact,
+                icon: const Icon(
+                  Icons.close_rounded,
+                  color: Color(0xFF9AA197),
+                  size: 19,
                 ),
               ),
             ],
           ),
-          const SizedBox(height: 8),
-          Expanded(
-            child: _recentLocal.isEmpty
-                ? _localHint()
-                : ListView.separated(
-                    itemCount: _recentLocal.length,
-                    separatorBuilder: (_, __) => const SizedBox(height: 5),
-                    itemBuilder: (context, index) =>
-                        _mediaRow(_recentLocal[index]),
-                  ),
-          ),
-        ],
-      );
-
-  Widget _webDavLibrary() {
-    if (_service == null) {
-      return SingleChildScrollView(
-        child: Column(
-          children: [
-            _field(
-              _url,
-              'WebDAV 地址',
-              hint: 'https://cloud.example.com/remote.php/dav/files/name/',
-              icon: Icons.link_rounded,
-            ),
-            const SizedBox(height: 10),
-            Row(
-              children: [
-                Expanded(
-                  child: _field(
-                    _user,
-                    '用户名',
-                    icon: Icons.person_outline_rounded,
-                  ),
-                ),
-                const SizedBox(width: 9),
-                Expanded(
-                  child: _field(
-                    _pass,
-                    '密码',
-                    icon: Icons.lock_outline_rounded,
-                    obscure: true,
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 12),
-            SizedBox(
-              width: double.infinity,
-              height: 45,
-              child: FilledButton(
-                onPressed: _loading ? null : _connect,
-                style: FilledButton.styleFrom(
-                  backgroundColor: _ink,
-                  foregroundColor: Colors.white,
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(14),
-                  ),
-                ),
-                child: _loading
-                    ? const SizedBox(
-                        width: 18,
-                        height: 18,
-                        child: CircularProgressIndicator(
-                          strokeWidth: 2,
-                          color: _green,
-                        ),
-                      )
-                    : const Text('连接 WebDAV'),
-              ),
-            ),
-            const SizedBox(height: 12),
-            Text(
-              'WebDAV 是可选网络媒体库；本地文件可直接播放。',
-              style: TextStyle(
-                fontSize: 10,
-                color: Colors.black.withValues(alpha: .42),
-              ),
-            ),
-          ],
-        ),
-      );
-    }
-
-    return Column(
-      children: [
-        Row(
-          children: [
-            if (_path != '/')
-              IconButton(
-                onPressed: _back,
-                icon: const Icon(Icons.arrow_back_rounded, size: 19),
-              ),
-            Expanded(
-              child: Text(
-                _path,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(
-                  fontSize: 11,
-                  color: Colors.black.withValues(alpha: .45),
-                ),
-              ),
-            ),
-            _filterMenu(),
-          ],
-        ),
-        const SizedBox(height: 5),
-        Expanded(
-          child: _loading
-              ? const Center(child: CircularProgressIndicator())
-              : _visibleWebDavItems.isEmpty
-                  ? _webDavEmpty()
-                  : ListView.separated(
-                      itemCount: _visibleWebDavItems.length,
-                      separatorBuilder: (_, __) => const SizedBox(height: 5),
-                      itemBuilder: (context, index) =>
-                          _mediaRow(_visibleWebDavItems[index]),
-                    ),
-        ),
-      ],
-    );
-  }
-
-  Widget _field(
-    TextEditingController controller,
-    String label, {
-    String? hint,
-    IconData? icon,
-    bool obscure = false,
-  }) =>
-      TextField(
-        controller: controller,
-        obscureText: obscure,
-        style: const TextStyle(fontSize: 12),
-        decoration: InputDecoration(
-          labelText: label,
-          hintText: hint,
-          prefixIcon: icon == null ? null : Icon(icon, size: 16),
-          filled: true,
-          fillColor: const Color(0xFFF6F7F3),
-          contentPadding:
-              const EdgeInsets.symmetric(horizontal: 12, vertical: 13),
-          border: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(13),
-            borderSide: BorderSide.none,
-          ),
-          enabledBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(13),
-            borderSide: BorderSide.none,
-          ),
-          labelStyle: const TextStyle(fontSize: 11),
-        ),
-      );
-
-  Widget _filterMenu() => Wrap(
-        spacing: 4,
-        children: ['全部', '视频', '音频'].map((filter) {
-          final selected = _filter == filter;
-          return InkWell(
-            onTap: () => setState(() => _filter = filter),
-            borderRadius: BorderRadius.circular(20),
-            child: AnimatedContainer(
-              duration: const Duration(milliseconds: 160),
-              padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 6),
-              decoration: BoxDecoration(
-                color: selected ? _ink : const Color(0xFFF2F3EF),
-                borderRadius: BorderRadius.circular(20),
-              ),
-              child: Text(
-                filter,
-                style: TextStyle(
-                  fontSize: 9,
-                  fontWeight: FontWeight.w700,
-                  color: selected ? Colors.white : _ink,
-                ),
-              ),
-            ),
-          );
-        }).toList(),
-      );
-
-  Widget _mediaRow(MediaItem item) {
-    final active = _playing?.url == item.url;
-    return InkWell(
-      onTap: () => _play(item),
-      borderRadius: BorderRadius.circular(15),
-      child: Container(
-        padding: const EdgeInsets.all(9),
-        decoration: BoxDecoration(
-          color: active ? const Color(0xFFF0F8E7) : Colors.transparent,
-          borderRadius: BorderRadius.circular(15),
-        ),
-        child: Row(
-          children: [
-            Container(
-              width: 42,
-              height: 42,
-              decoration: BoxDecoration(
-                color: item.isDirectory
-                    ? const Color(0xFFF1F0E8)
-                    : const Color(0xFFE8F3DC),
-                borderRadius: BorderRadius.circular(12),
-              ),
-              child: Icon(
-                item.isDirectory
-                    ? Icons.folder_rounded
-                    : item.isAudio
-                        ? Icons.music_note_rounded
-                        : Icons.movie_outlined,
-                color: item.isDirectory
-                    ? const Color(0xFF9B843D)
-                    : const Color(0xFF527B30),
-                size: 20,
-              ),
-            ),
-            const SizedBox(width: 11),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    item.name,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                      fontSize: 12,
-                      fontWeight: FontWeight.w700,
-                      color: _ink,
-                    ),
-                  ),
-                  const SizedBox(height: 4),
-                  Text(
-                    item.isDirectory
-                        ? '文件夹'
-                        : '${item.extension.toUpperCase()} · ${item.prettySize}',
-                    style: TextStyle(
-                      fontSize: 10,
-                      color: Colors.black.withValues(alpha: .45),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            Icon(
-              active
-                  ? Icons.equalizer_rounded
-                  : item.isDirectory
-                      ? Icons.chevron_right_rounded
-                      : Icons.play_circle_outline_rounded,
-              color: active ? const Color(0xFF6C9F3A) : Colors.black26,
-              size: 20,
-            ),
-          ],
         ),
       ),
-    );
+    ),
+  );
+
+  Future<void> _removeRecent(MediaItem item) async {
+    setState(() => _recent.removeWhere((entry) => entry.url == item.url));
+    await _saveHistory();
   }
 
-  Widget _playerPanel() => Container(
-        clipBehavior: Clip.antiAlias,
-        decoration: BoxDecoration(
-          color: const Color(0xFF17211C),
-          borderRadius: BorderRadius.circular(25),
-        ),
-        child: _playing == null
-            ? _playerPlaceholder()
-            : Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  Expanded(
-                    child: Center(
-                      child: _player == null
-                          ? const CircularProgressIndicator(color: _green)
-                          : _playing!.isAudio
-                              ? _audioPlaceholder()
-                              : AspectRatio(
-                                  aspectRatio: _player!.value.aspectRatio,
-                                  child: VideoPlayer(_player!),
-                                ),
-                    ),
-                  ),
-                  if (_player != null && _playing!.isVideo)
-                    VideoProgressIndicator(
-                      _player!,
-                      allowScrubbing: true,
-                      padding: const EdgeInsets.symmetric(vertical: 6),
-                      colors: const VideoProgressColors(
-                        playedColor: _green,
-                        bufferedColor: Colors.white30,
-                        backgroundColor: Colors.white12,
-                      ),
-                    ),
-                  Container(
-                    padding: const EdgeInsets.fromLTRB(20, 12, 16, 14),
-                    color: const Color(0xFF202C25),
-                    child: Row(
-                      children: [
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                _playing!.name,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: const TextStyle(
-                                  color: Colors.white,
-                                  fontSize: 13,
-                                  fontWeight: FontWeight.w700,
-                                ),
-                              ),
-                              const SizedBox(height: 4),
-                              Text(
-                                _playing!.isLocal ? '本地文件' : 'WEBDAV STREAM',
-                                style: const TextStyle(
-                                  color: Colors.white54,
-                                  fontSize: 9,
-                                  letterSpacing: 1.3,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                        if (_player != null)
-                          ValueListenableBuilder<VideoPlayerValue>(
-                            valueListenable: _player!,
-                            builder: (context, value, child) => IconButton(
-                              tooltip: value.isPlaying ? '暂停' : '播放',
-                              onPressed: () => value.isPlaying
-                                  ? _player!.pause()
-                                  : _player!.play(),
-                              icon: Icon(
-                                value.isPlaying
-                                    ? Icons.pause_rounded
-                                    : Icons.play_arrow_rounded,
-                                color: _green,
-                                size: 29,
-                              ),
-                            ),
-                          ),
-                      ],
-                    ),
-                  ),
-                ],
-              ),
-      );
-
-  Widget _playerPlaceholder() => Stack(
-        children: [
-          Positioned(
-            right: -80,
-            top: -100,
-            child: Container(
-              width: 330,
-              height: 330,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: _green.withValues(alpha: .05),
-              ),
-            ),
-          ),
-          Center(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Container(
-                  width: 70,
-                  height: 70,
-                  decoration: BoxDecoration(
-                    color: Colors.white.withValues(alpha: .06),
-                    borderRadius: BorderRadius.circular(23),
-                  ),
-                  child: const Icon(
-                    Icons.play_arrow_rounded,
-                    color: _green,
-                    size: 38,
-                  ),
-                ),
-                const SizedBox(height: 18),
-                const Text(
-                  '播放本地视频',
-                  style: TextStyle(
-                    color: Colors.white,
-                    fontSize: 17,
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-                const SizedBox(height: 7),
-                const Text(
-                  '选择设备中的视频文件即可开始播放',
-                  style: TextStyle(color: Colors.white54, fontSize: 12),
-                ),
-                const SizedBox(height: 18),
-                FilledButton.icon(
-                  onPressed: _pickLocalVideo,
-                  icon: const Icon(Icons.folder_open_rounded, size: 17),
-                  label: const Text('选择视频'),
-                  style: FilledButton.styleFrom(
-                    backgroundColor: _green,
-                    foregroundColor: _ink,
-                  ),
-                ),
-              ],
-            ),
-          ),
-          Positioned(
-            left: 22,
-            bottom: 20,
-            child: Row(
-              children: [
-                Container(
-                  width: 7,
-                  height: 7,
-                  decoration: const BoxDecoration(
-                    color: _green,
-                    shape: BoxShape.circle,
-                  ),
-                ),
-                const SizedBox(width: 8),
-                const Text(
-                  'STREAMBOX PLAYER',
-                  style: TextStyle(
-                    color: Colors.white38,
-                    fontSize: 9,
-                    letterSpacing: 1.6,
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ],
-      );
-
-  Widget _audioPlaceholder() => Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Container(
-            width: 100,
-            height: 100,
-            decoration: BoxDecoration(
-              color: Colors.white.withValues(alpha: .06),
-              borderRadius: BorderRadius.circular(28),
-            ),
-            child: const Icon(Icons.graphic_eq_rounded, color: _green, size: 48),
-          ),
-          const SizedBox(height: 16),
-          Text(
-            _playing!.name,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: const TextStyle(color: Colors.white, fontSize: 13),
-          ),
-        ],
-      );
-
-  Widget _localHint() => Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Icon(Icons.video_library_outlined, color: Color(0xFF9AA394), size: 29),
-            const SizedBox(height: 10),
-            Text(
-              '最近播放的视频会显示在这里',
-              style: TextStyle(
-                fontSize: 11,
-                color: Colors.black.withValues(alpha: .46),
-              ),
-            ),
-          ],
-        ),
-      );
-
-  Widget _webDavEmpty() => Center(
-        child: Text(
-          '这个文件夹里没有媒体文件',
-          style: TextStyle(
-            fontSize: 12,
-            color: Colors.black.withValues(alpha: .45),
+  Widget _emptyHistory() => Container(
+    width: double.infinity,
+    padding: const EdgeInsets.symmetric(vertical: 23, horizontal: 18),
+    decoration: BoxDecoration(
+      color: Colors.white,
+      borderRadius: BorderRadius.circular(18),
+    ),
+    child: const Row(
+      children: [
+        Icon(Icons.history_rounded, color: Color(0xFF9CA498), size: 23),
+        SizedBox(width: 12),
+        Expanded(
+          child: Text(
+            '打开过的视频会保存在这里，方便下次继续播放。',
+            style: TextStyle(color: Color(0xFF737D72), fontSize: 11),
           ),
         ),
-      );
+      ],
+    ),
+  );
 
-  void _showMessage(String message) => ScaffoldMessenger.of(context)
-      .showSnackBar(SnackBar(content: Text(message)));
+  Widget _webDavCard() => Container(
+    padding: const EdgeInsets.fromLTRB(17, 15, 12, 15),
+    decoration: BoxDecoration(
+      color: const Color(0xFFEDEFE8),
+      borderRadius: BorderRadius.circular(18),
+    ),
+    child: Row(
+      children: [
+        const Icon(Icons.cloud_outlined, color: _ink, size: 21),
+        const SizedBox(width: 11),
+        const Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'WebDAV 网络媒体库',
+                style: TextStyle(
+                  color: _ink,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+              SizedBox(height: 3),
+              Text(
+                '需要时再连接，账号信息不会保存',
+                style: TextStyle(color: Color(0xFF7C857A), fontSize: 10),
+              ),
+            ],
+          ),
+        ),
+        IconButton(
+          tooltip: '连接 WebDAV',
+          onPressed: () async {
+            final result = await Navigator.of(context).push<WebDavPlayback>(
+              MaterialPageRoute(builder: (_) => const WebDavScreen()),
+            );
+            if (result != null) {
+              await _launchPlayer(
+                result.queue,
+                result.index,
+                headers: result.headers,
+              );
+            }
+          },
+          icon: const Icon(Icons.chevron_right_rounded, color: _ink),
+        ),
+      ],
+    ),
+  );
+
+  void _message(String text) =>
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(text)));
 
   String _friendlyError(Object error) => error
       .toString()
       .replaceFirst('Exception: ', '')
       .replaceFirst('DioException [bad response]: ', '服务器返回异常：');
 }
+
