@@ -56,10 +56,12 @@ jobs:
           RELEASE_TAG: ${{ steps.version.outputs.tag }}
           RELEASE_VERSION: ${{ steps.version.outputs.version }}
         run: |
+          release_notes="$(printf '## Streambox Beta %s\n\nThis is a preview build for testing. It is published separately from stable releases.\n\nThe generated changelog below lists the commits included in this build.\n' "$RELEASE_VERSION")"
           gh release create "$RELEASE_TAG" build/app/outputs/flutter-apk/app-release.apk \
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
             --title "Streambox ${RELEASE_VERSION} (Beta)" \
+            --notes "$release_notes" \
             --generate-notes \
             --prerelease
 
@@ -106,8 +108,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          release_notes="$(printf '## Streambox %s\n\nStable Android release. The generated changelog below lists the commits included in this version.\n' "$GITHUB_REF_NAME")"
           gh release create "$GITHUB_REF_NAME" build/app/outputs/flutter-apk/app-release.apk \
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
             --title "Streambox $GITHUB_REF_NAME" \
+            --notes "$release_notes" \
             --generate-notes
