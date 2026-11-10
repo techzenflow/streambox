@@ -1,9 +1,12 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:math' as math;
 
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:video_player/video_player.dart';
 
 import '../models/media_item.dart';
@@ -32,17 +35,34 @@ class PlayerScreen extends StatefulWidget {
 }
 
 class _PlayerScreenState extends State<PlayerScreen> {
+  static const _progressKey = 'streambox.playbackProgress';
+
   VideoPlayerController? _controller;
   late int _index = widget.initialIndex;
   late double _speed = widget.settings.defaultSpeed;
+  late int _repeatMode = widget.settings.repeatMode;
   BoxFit _fit = BoxFit.contain;
   bool _loading = true;
   bool _fullscreen = false;
   bool _controlsVisible = true;
   bool _locked = false;
+  bool _handlingCompletion = false;
+  bool _gestureIndicatorVisible = false;
+  double _volume = 1;
+  double _scrubDeltaMilliseconds = 0;
+  Duration? _scrubStart;
+  Duration? _scrubTarget;
+  String? _gestureLabel;
   String? _error;
+  String? _subtitleName;
+  String? _activeUrl;
+  bool _activeIsLocal = false;
+  Duration _subtitleDelay = Duration.zero;
+  List<_SubtitleCue> _subtitles = [];
   Timer? _hideTimer;
   Timer? _sleepTimer;
+  Timer? _positionTimer;
+  Timer? _gestureTimer;
 
   MediaItem get _item => widget.queue[_index];
 
@@ -56,6 +76,10 @@ class _PlayerScreenState extends State<PlayerScreen> {
   void dispose() {
     _hideTimer?.cancel();
     _sleepTimer?.cancel();
+    _positionTimer?.cancel();
+    _gestureTimer?.cancel();
+    unawaited(_savePlaybackPosition());
+    _controller?.removeListener(_handleControllerUpdate);
     _controller?.dispose();
     _restoreSystemUi();
     super.dispose();
@@ -76,13 +100,21 @@ class _PlayerScreenState extends State<PlayerScreen> {
           defaultTargetPlatform == TargetPlatform.iOS);
 
   Future<void> _openCurrent() async {
+    await _savePlaybackPosition();
     final previous = _controller;
     _hideTimer?.cancel();
+    _positionTimer?.cancel();
+    previous?.removeListener(_handleControllerUpdate);
+    _activeUrl = null;
+    _activeIsLocal = false;
     setState(() {
       _controller = null;
       _loading = true;
       _error = null;
       _controlsVisible = true;
+      _subtitles = [];
+      _subtitleName = null;
+      _subtitleDelay = Duration.zero;
     });
     await previous?.dispose();
 
@@ -97,6 +129,31 @@ class _PlayerScreenState extends State<PlayerScreen> {
         );
       }
       await next.initialize();
+      final resumePosition = await _resumePositionFor(
+        _item,
+        next.value.duration,
+      );
+      if (resumePosition != null && mounted) {
+        final resume = await showDialog<bool>(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: const Text('继续播放？'),
+            content: Text('上次播放到 ${_formatTime(resumePosition)}，要从这里继续吗？'),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context, false),
+                child: const Text('从头播放'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.pop(context, true),
+                child: const Text('继续播放'),
+              ),
+            ],
+          ),
+        );
+        if (resume == true) await next.seekTo(resumePosition);
+        if (resume != true) await _clearSavedPosition(_item.url);
+      }
       await next.setPlaybackSpeed(_speed);
       await next.play();
       if (!mounted) {
@@ -107,6 +164,15 @@ class _PlayerScreenState extends State<PlayerScreen> {
         _controller = next;
         _loading = false;
       });
+      _activeUrl = _item.url;
+      _activeIsLocal = _item.isLocal;
+      _handlingCompletion = false;
+      _volume = next.value.volume;
+      next.addListener(_handleControllerUpdate);
+      _positionTimer = Timer.periodic(
+        const Duration(seconds: 5),
+        (_) => unawaited(_savePlaybackPosition()),
+      );
       _scheduleHide();
     } catch (error) {
       await next?.dispose();
@@ -190,9 +256,14 @@ class _PlayerScreenState extends State<PlayerScreen> {
     if (controller == null) return;
     if (controller.value.isPlaying) {
       await controller.pause();
+      await _savePlaybackPosition();
       _hideTimer?.cancel();
       if (mounted) setState(() => _controlsVisible = true);
     } else {
+      if (controller.value.isCompleted) {
+        _handlingCompletion = false;
+        await controller.seekTo(Duration.zero);
+      }
       await controller.play();
       _scheduleHide();
     }
@@ -214,8 +285,305 @@ class _PlayerScreenState extends State<PlayerScreen> {
     _scheduleHide();
   }
 
+  Future<Map<String, int>> _readSavedPositions() async {
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getString(_progressKey);
+    if (raw == null) return {};
+    try {
+      final decoded = jsonDecode(raw) as Map;
+      return decoded.map(
+        (key, value) => MapEntry(key.toString(), (value as num).toInt()),
+      );
+    } catch (_) {
+      return {};
+    }
+  }
+
+  Future<Duration?> _resumePositionFor(
+    MediaItem item,
+    Duration duration,
+  ) async {
+    if (!widget.settings.rememberPosition || !item.isLocal || kIsWeb) {
+      return null;
+    }
+    final positions = await _readSavedPositions();
+    final milliseconds = positions[item.url];
+    if (milliseconds == null ||
+        milliseconds < 10000 ||
+        duration.inMilliseconds - milliseconds < 15000) {
+      await _clearSavedPosition(item.url);
+      return null;
+    }
+    return Duration(milliseconds: milliseconds);
+  }
+
+  Future<void> _savePlaybackPosition() async {
+    final url = _activeUrl;
+    final controller = _controller;
+    if (!widget.settings.rememberPosition ||
+        kIsWeb ||
+        !_activeIsLocal ||
+        url == null ||
+        controller == null ||
+        !controller.value.isInitialized) {
+      return;
+    }
+    final value = controller.value;
+    final positions = await _readSavedPositions();
+    if (value.duration.inMilliseconds - value.position.inMilliseconds < 10000 ||
+        value.position.inSeconds < 5) {
+      positions.remove(url);
+    } else {
+      positions[url] = value.position.inMilliseconds;
+    }
+    while (positions.length > 100) {
+      positions.remove(positions.keys.first);
+    }
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_progressKey, jsonEncode(positions));
+  }
+
+  Future<void> _clearSavedPosition(String url) async {
+    final positions = await _readSavedPositions();
+    if (positions.remove(url) == null) return;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_progressKey, jsonEncode(positions));
+  }
+
+  void _handleControllerUpdate() {
+    final controller = _controller;
+    if (controller == null ||
+        !controller.value.isCompleted ||
+        _handlingCompletion) {
+      return;
+    }
+    _handlingCompletion = true;
+    unawaited(_handlePlaybackCompleted());
+  }
+
+  Future<void> _handlePlaybackCompleted() async {
+    await _savePlaybackPosition();
+    if (!mounted) return;
+    if (_repeatMode == 2) {
+      await _controller?.seekTo(Duration.zero);
+      await _controller?.play();
+      _handlingCompletion = false;
+      return;
+    }
+    final shouldLoop = _repeatMode == 1;
+    final nextIndex = _index + 1;
+    if (nextIndex < widget.queue.length &&
+        (widget.settings.autoPlayNext || _repeatMode == 1)) {
+      await _changeTrack(nextIndex);
+    } else if (shouldLoop && widget.queue.isNotEmpty) {
+      await _changeTrack(0);
+    } else {
+      setState(() => _controlsVisible = true);
+    }
+  }
+
+  void _startScrub(DragStartDetails details) {
+    final controller = _controller;
+    if (_locked || controller == null || !controller.value.isInitialized) {
+      return;
+    }
+    _hideTimer?.cancel();
+    _scrubStart = controller.value.position;
+    _scrubTarget = _scrubStart;
+    _scrubDeltaMilliseconds = 0;
+    _gestureLabel = '拖动定位';
+    _gestureIndicatorVisible = true;
+  }
+
+  void _updateScrub(DragUpdateDetails details) {
+    final controller = _controller;
+    final start = _scrubStart;
+    if (controller == null || start == null) return;
+    _scrubDeltaMilliseconds += details.delta.dx * 300;
+    final duration = controller.value.duration.inMilliseconds;
+    final target = (start.inMilliseconds + _scrubDeltaMilliseconds.round())
+        .clamp(0, duration)
+        .toInt();
+    setState(() {
+      _scrubTarget = Duration(milliseconds: target);
+      _gestureLabel = '${_formatTime(_scrubTarget!)}  ·  拖动定位';
+      _gestureIndicatorVisible = true;
+    });
+  }
+
+  Future<void> _endScrub(DragEndDetails details) async {
+    final target = _scrubTarget;
+    _scrubStart = null;
+    _scrubTarget = null;
+    if (target != null) await _controller?.seekTo(target);
+    if (mounted) setState(() => _gestureIndicatorVisible = false);
+    _scheduleHide();
+  }
+
+  bool _volumeGesture = false;
+  double _volumeAtDragStart = 1;
+
+  void _startVerticalGesture(DragStartDetails details) {
+    final width = MediaQuery.sizeOf(context).width;
+    _volumeGesture = details.localPosition.dx >= width * .55 && !_locked;
+    _volumeAtDragStart = _controller?.value.volume ?? _volume;
+    if (_volumeGesture) {
+      _hideTimer?.cancel();
+      setState(() {
+        _volume = _volumeAtDragStart;
+        _gestureLabel = '音量 ${(100 * _volume).round()}%';
+        _gestureIndicatorVisible = true;
+      });
+    }
+  }
+
+  void _updateVerticalGesture(DragUpdateDetails details) {
+    if (!_volumeGesture || _locked) return;
+    setState(() {
+      _volume = (_volume - details.delta.dy / 180).clamp(0, 1).toDouble();
+      _gestureLabel = '音量 ${(100 * _volume).round()}%';
+      _gestureIndicatorVisible = true;
+    });
+    unawaited(_controller?.setVolume(_volume));
+  }
+
+  void _endVerticalGesture(DragEndDetails details) {
+    if (!_volumeGesture) return;
+    _volumeGesture = false;
+    _gestureTimer?.cancel();
+    _gestureTimer = Timer(const Duration(milliseconds: 900), () {
+      if (mounted) setState(() => _gestureIndicatorVisible = false);
+    });
+    _scheduleHide();
+  }
+
+  Future<void> _setTemporarySpeed(bool enabled) async {
+    if (_locked) return;
+    final speed = enabled ? 2.0 : _speed;
+    if (enabled) {
+      _hideTimer?.cancel();
+      setState(() {
+        _gestureLabel = '2.0x 快进';
+        _gestureIndicatorVisible = true;
+      });
+    } else {
+      setState(() => _gestureIndicatorVisible = false);
+      _scheduleHide();
+    }
+    await _controller?.setPlaybackSpeed(speed);
+  }
+
+  Future<void> _showSubtitleOptions() async {
+    _hideTimer?.cancel();
+    final action = await showModalBottomSheet<String>(
+      context: context,
+      backgroundColor: Colors.white,
+      showDragHandle: true,
+      builder: (context) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 2, 20, 10),
+              child: Text(
+                _subtitleName == null ? '字幕' : '字幕 · $_subtitleName',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  color: _ink,
+                  fontSize: 17,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+            ),
+            ListTile(
+              leading: const Icon(Icons.file_open_outlined),
+              title: const Text('加载本地字幕'),
+              subtitle: const Text('支持 SRT、VTT'),
+              onTap: () => Navigator.pop(context, 'load'),
+            ),
+            if (_subtitles.isNotEmpty) ...[
+              ListTile(
+                leading: const Icon(Icons.fast_rewind_rounded),
+                title: const Text('字幕提前 0.5 秒'),
+                onTap: () => Navigator.pop(context, 'earlier'),
+              ),
+              ListTile(
+                leading: const Icon(Icons.fast_forward_rounded),
+                title: const Text('字幕延后 0.5 秒'),
+                onTap: () => Navigator.pop(context, 'later'),
+              ),
+              ListTile(
+                leading: const Icon(Icons.subtitles_off_outlined),
+                title: const Text('关闭字幕'),
+                onTap: () => Navigator.pop(context, 'off'),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+    if (!mounted || action == null) return;
+    if (action == 'load') {
+      await _loadSubtitleFile();
+    } else if (action == 'off') {
+      setState(() {
+        _subtitles = [];
+        _subtitleName = null;
+        _subtitleDelay = Duration.zero;
+      });
+    } else if (action == 'earlier') {
+      setState(() => _subtitleDelay -= const Duration(milliseconds: 500));
+    } else if (action == 'later') {
+      setState(() => _subtitleDelay += const Duration(milliseconds: 500));
+    }
+    _scheduleHide();
+  }
+
+  Future<void> _cycleRepeatMode() async {
+    setState(() => _repeatMode = (_repeatMode + 1) % 3);
+    await widget.settings.copyWith(repeatMode: _repeatMode).save();
+  }
+
+  Future<void> _loadSubtitleFile() async {
+    try {
+      final files = await FilePicker.pickFiles(
+        dialogTitle: '选择字幕文件',
+        type: FileType.custom,
+        allowedExtensions: const ['srt', 'vtt'],
+      );
+      if (files.isEmpty) return;
+      final file = files.first;
+      final bytes = await file.readAsBytes();
+      final parsed = _SubtitleCue.parse(
+        utf8.decode(bytes, allowMalformed: true),
+      );
+      if (parsed.isEmpty) throw Exception('没有识别到有效字幕时间轴');
+      if (!mounted) return;
+      setState(() {
+        _subtitles = parsed;
+        _subtitleName = file.name;
+        _subtitleDelay = Duration.zero;
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('已加载字幕：${file.name}（${parsed.length} 条）')),
+      );
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            '加载字幕失败：${error.toString().replaceFirst('Exception: ', '')}',
+          ),
+        ),
+      );
+    }
+  }
+
   Future<void> _changeTrack(int index) async {
     if (index < 0 || index >= widget.queue.length) return;
+    await _savePlaybackPosition();
     if (_fullscreen) await _leaveFullscreen();
     setState(() => _index = index);
     await _openCurrent();
@@ -412,6 +780,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
       setState(() {});
       _sleepTimer = Timer(Duration(minutes: minutes), () async {
         await _controller?.pause();
+        await _savePlaybackPosition();
         if (!mounted) return;
         setState(() => _controlsVisible = true);
         ScaffoldMessenger.of(
@@ -488,6 +857,14 @@ class _PlayerScreenState extends State<PlayerScreen> {
   Widget _videoSurface({required bool fullscreen}) => GestureDetector(
     behavior: HitTestBehavior.opaque,
     onTap: _toggleControls,
+    onHorizontalDragStart: _startScrub,
+    onHorizontalDragUpdate: _updateScrub,
+    onHorizontalDragEnd: _endScrub,
+    onVerticalDragStart: _startVerticalGesture,
+    onVerticalDragUpdate: _updateVerticalGesture,
+    onVerticalDragEnd: _endVerticalGesture,
+    onLongPressStart: (_) => unawaited(_setTemporarySpeed(true)),
+    onLongPressEnd: (_) => unawaited(_setTemporarySpeed(false)),
     child: Stack(
       fit: StackFit.expand,
       children: [
@@ -499,18 +876,53 @@ class _PlayerScreenState extends State<PlayerScreen> {
                 Expanded(
                   child: GestureDetector(
                     behavior: HitTestBehavior.translucent,
-                    onDoubleTap: () => _seekBy(const Duration(seconds: -10)),
+                    onDoubleTap: _locked
+                        ? null
+                        : () => _seekBy(
+                            Duration(seconds: -widget.settings.seekSeconds),
+                          ),
                     child: const SizedBox.expand(),
                   ),
                 ),
                 Expanded(
                   child: GestureDetector(
                     behavior: HitTestBehavior.translucent,
-                    onDoubleTap: () => _seekBy(const Duration(seconds: 10)),
+                    onDoubleTap: _locked
+                        ? null
+                        : () => _seekBy(
+                            Duration(seconds: widget.settings.seekSeconds),
+                          ),
                     child: const SizedBox.expand(),
                   ),
                 ),
               ],
+            ),
+          ),
+        if (_subtitles.isNotEmpty && !_item.isAudio)
+          _subtitleOverlay(fullscreen: fullscreen),
+        if (_gestureIndicatorVisible && _gestureLabel != null)
+          Positioned.fill(
+            child: IgnorePointer(
+              child: Center(
+                child: Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 18,
+                    vertical: 12,
+                  ),
+                  decoration: BoxDecoration(
+                    color: Colors.black.withValues(alpha: .68),
+                    borderRadius: BorderRadius.circular(18),
+                  ),
+                  child: Text(
+                    _gestureLabel!,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 14,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ),
+              ),
             ),
           ),
         if (_controlsVisible) _controlsOverlay(fullscreen: fullscreen),
@@ -531,6 +943,50 @@ class _PlayerScreenState extends State<PlayerScreen> {
             ),
           ),
       ],
+    ),
+  );
+
+  Widget _subtitleOverlay({required bool fullscreen}) => Positioned(
+    left: 18,
+    right: 18,
+    bottom: fullscreen ? 82 : 12,
+    child: IgnorePointer(
+      child: ValueListenableBuilder<VideoPlayerValue>(
+        valueListenable: _controller ?? _emptyController,
+        builder: (context, value, child) {
+          final position =
+              value.position.inMilliseconds - _subtitleDelay.inMilliseconds;
+          String? text;
+          for (final cue in _subtitles) {
+            if (position >= cue.startMilliseconds &&
+                position <= cue.endMilliseconds) {
+              text = cue.text;
+              break;
+            }
+          }
+          if (text == null || text.isEmpty) return const SizedBox.shrink();
+          return Center(
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+              decoration: BoxDecoration(
+                color: Colors.black.withValues(alpha: .72),
+                borderRadius: BorderRadius.circular(6),
+              ),
+              child: Text(
+                text,
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: widget.settings.subtitleFontSize,
+                  height: 1.2,
+                  fontWeight: FontWeight.w600,
+                  shadows: const [Shadow(color: Colors.black, blurRadius: 3)],
+                ),
+              ),
+            ),
+          );
+        },
+      ),
     ),
   );
 
@@ -645,6 +1101,17 @@ class _PlayerScreenState extends State<PlayerScreen> {
               color: Colors.white,
             ),
           ),
+        if (!_item.isAudio)
+          IconButton(
+            tooltip: _subtitleName == null ? '加载字幕' : '字幕设置',
+            onPressed: _showSubtitleOptions,
+            icon: Icon(
+              _subtitleName == null
+                  ? Icons.subtitles_outlined
+                  : Icons.subtitles_rounded,
+              color: Colors.white,
+            ),
+          ),
         IconButton(
           tooltip: '画面比例',
           onPressed: _showDisplayPicker,
@@ -668,8 +1135,9 @@ class _PlayerScreenState extends State<PlayerScreen> {
       ),
       const SizedBox(width: 4),
       IconButton(
-        tooltip: '后退 10 秒',
-        onPressed: () => _seekBy(const Duration(seconds: -10)),
+        tooltip: '后退 ${widget.settings.seekSeconds} 秒',
+        onPressed: () =>
+            _seekBy(Duration(seconds: -widget.settings.seekSeconds)),
         icon: const Icon(
           Icons.replay_10_rounded,
           color: Colors.white,
@@ -699,8 +1167,9 @@ class _PlayerScreenState extends State<PlayerScreen> {
       ),
       const SizedBox(width: 4),
       IconButton(
-        tooltip: '前进 10 秒',
-        onPressed: () => _seekBy(const Duration(seconds: 10)),
+        tooltip: '前进 ${widget.settings.seekSeconds} 秒',
+        onPressed: () =>
+            _seekBy(Duration(seconds: widget.settings.seekSeconds)),
         icon: const Icon(
           Icons.forward_10_rounded,
           color: Colors.white,
@@ -754,6 +1223,22 @@ class _PlayerScreenState extends State<PlayerScreen> {
                     ? Icons.timer_rounded
                     : Icons.timer_outlined,
                 color: _sleepTimer?.isActive == true ? _green : Colors.white,
+                size: 20,
+              ),
+            ),
+            IconButton(
+              tooltip: switch (_repeatMode) {
+                1 => '列表循环',
+                2 => '单曲循环',
+                _ => '不循环',
+              },
+              onPressed: _cycleRepeatMode,
+              visualDensity: VisualDensity.compact,
+              icon: Icon(
+                _repeatMode == 2
+                    ? Icons.repeat_one_rounded
+                    : Icons.repeat_rounded,
+                color: _repeatMode == 0 ? Colors.white : _green,
                 size: 20,
               ),
             ),
@@ -857,16 +1342,18 @@ class _PlayerScreenState extends State<PlayerScreen> {
           Expanded(
             child: _actionButton(
               icon: Icons.replay_10_rounded,
-              label: '后退 10 秒',
-              onPressed: () => _seekBy(const Duration(seconds: -10)),
+              label: '后退 ${widget.settings.seekSeconds} 秒',
+              onPressed: () =>
+                  _seekBy(Duration(seconds: -widget.settings.seekSeconds)),
             ),
           ),
           const SizedBox(width: 9),
           Expanded(
             child: _actionButton(
               icon: Icons.forward_10_rounded,
-              label: '前进 10 秒',
-              onPressed: () => _seekBy(const Duration(seconds: 10)),
+              label: '前进 ${widget.settings.seekSeconds} 秒',
+              onPressed: () =>
+                  _seekBy(Duration(seconds: widget.settings.seekSeconds)),
             ),
           ),
           const SizedBox(width: 9),
@@ -880,6 +1367,49 @@ class _PlayerScreenState extends State<PlayerScreen> {
         ],
       ),
       const SizedBox(height: 12),
+      Row(
+        children: [
+          const Icon(Icons.volume_up_rounded, color: _ink, size: 18),
+          Expanded(
+            child: Slider(
+              min: 0,
+              max: 1,
+              value: _volume.clamp(0, 1).toDouble(),
+              activeColor: _ink,
+              onChanged: (value) {
+                setState(() => _volume = value);
+                _controller?.setVolume(value);
+              },
+            ),
+          ),
+          Text(
+            '${(_volume * 100).round()}%',
+            style: const TextStyle(color: Color(0xFF7E867D), fontSize: 10),
+          ),
+        ],
+      ),
+      Container(
+        margin: const EdgeInsets.only(top: 4, bottom: 12),
+        padding: const EdgeInsets.all(13),
+        decoration: BoxDecoration(
+          color: const Color(0xFFEDEFE8),
+          borderRadius: BorderRadius.circular(14),
+        ),
+        child: const Text(
+          '手势：双击左右跳转，横向拖动精确定位；长按 2 倍速，画面右侧上下滑动调音量。',
+          style: TextStyle(color: Color(0xFF59635B), fontSize: 11, height: 1.4),
+        ),
+      ),
+      if (!_item.isAudio)
+        _actionButton(
+          icon: Icons.subtitles_outlined,
+          label: _subtitleName == null
+              ? '加载外部字幕（SRT / VTT）'
+              : '字幕：$_subtitleName',
+          onPressed: _showSubtitleOptions,
+          expanded: false,
+        ),
+      if (!_item.isAudio) const SizedBox(height: 10),
       _actionButton(
         icon: Icons.playlist_play_rounded,
         label: '打开播放列表（${widget.queue.length}）',
@@ -969,6 +1499,72 @@ class _PlayerScreenState extends State<PlayerScreen> {
       return '$hours:${minutes.toString().padLeft(2, '0')}:${remainder.toString().padLeft(2, '0')}';
     }
     return '${seconds ~/ 60}:${remainder.toString().padLeft(2, '0')}';
+  }
+}
+
+class _SubtitleCue {
+  const _SubtitleCue({
+    required this.startMilliseconds,
+    required this.endMilliseconds,
+    required this.text,
+  });
+
+  final int startMilliseconds;
+  final int endMilliseconds;
+  final String text;
+
+  static List<_SubtitleCue> parse(String source) {
+    final lines = source
+        .replaceFirst('\uFEFF', '')
+        .replaceAll('\r', '')
+        .split('\n');
+    final cues = <_SubtitleCue>[];
+    for (var index = 0; index < lines.length; index++) {
+      final separator = lines[index].indexOf('-->');
+      if (separator < 0) continue;
+      final start = _parseTimestamp(lines[index].substring(0, separator));
+      final end = _parseTimestamp(lines[index].substring(separator + 3));
+      if (start == null || end == null || end <= start) continue;
+      final textLines = <String>[];
+      for (
+        var textIndex = index + 1;
+        textIndex < lines.length && lines[textIndex].trim().isNotEmpty;
+        textIndex++
+      ) {
+        textLines.add(lines[textIndex]);
+      }
+      final text = textLines
+          .join('\n')
+          .replaceAll(RegExp(r'<[^>]+>'), '')
+          .replaceAll('&nbsp;', ' ')
+          .replaceAll('&amp;', '&')
+          .replaceAll('&lt;', '<')
+          .replaceAll('&gt;', '>')
+          .trim();
+      if (text.isNotEmpty) {
+        cues.add(
+          _SubtitleCue(
+            startMilliseconds: start,
+            endMilliseconds: end,
+            text: text,
+          ),
+        );
+      }
+    }
+    cues.sort((a, b) => a.startMilliseconds.compareTo(b.startMilliseconds));
+    return cues;
+  }
+
+  static int? _parseTimestamp(String source) {
+    final match = RegExp(
+      r'(?:(\d{1,2}):)?(\d{1,2}):(\d{2})[,.](\d{1,3})',
+    ).firstMatch(source.trim());
+    if (match == null) return null;
+    final hours = int.tryParse(match.group(1) ?? '0') ?? 0;
+    final minutes = int.tryParse(match.group(2) ?? '') ?? 0;
+    final seconds = int.tryParse(match.group(3) ?? '') ?? 0;
+    final millis = int.tryParse((match.group(4) ?? '').padRight(3, '0')) ?? 0;
+    return ((hours * 60 + minutes) * 60 + seconds) * 1000 + millis;
   }
 }
 

@@ -24,12 +24,20 @@ class HomeScreen extends StatefulWidget {
 
 class _HomeScreenState extends State<HomeScreen> {
   static const _historyKey = 'streambox.localHistory';
+  static const _libraryKey = 'streambox.localLibrary';
+  static const _favoritesKey = 'streambox.favoriteMedia';
 
   int _tab = 0;
   bool _loading = true;
   bool _scanning = false;
+  bool _showAllLibrary = false;
   PlayerSettings _settings = const PlayerSettings();
   List<MediaItem> _recent = [];
+  List<MediaItem> _library = [];
+  Set<String> _favorites = {};
+  final TextEditingController _librarySearch = TextEditingController();
+  String _libraryFilter = '全部';
+  String _librarySort = '最近添加';
 
   bool get _supportsFolderScan =>
       !kIsWeb &&
@@ -43,35 +51,60 @@ class _HomeScreenState extends State<HomeScreen> {
     _loadSavedData();
   }
 
+  @override
+  void dispose() {
+    _librarySearch.dispose();
+    super.dispose();
+  }
+
   Future<void> _loadSavedData() async {
     try {
       final prefs = await SharedPreferences.getInstance();
       final settings = await PlayerSettings.load();
       final raw = prefs.getString(_historyKey);
       final decoded = raw == null ? <dynamic>[] : jsonDecode(raw) as List;
-      final recent = decoded
-          .whereType<Map>()
-          .map(
-            (entry) => MediaItem(
-              name: entry['name'] as String? ?? '视频',
-              url: entry['url'] as String? ?? '',
-              size: entry['size'] as int? ?? 0,
-              modified: null,
-              isLocal: true,
-            ),
-          )
-          .where((item) => item.url.isNotEmpty)
-          .toList();
+      final recent = decoded.whereType<Map>().map(_itemFromJson).toList();
+      final savedLibrary = prefs.getString(_libraryKey);
+      final libraryJson = savedLibrary == null
+          ? <dynamic>[]
+          : jsonDecode(savedLibrary) as List;
+      final favorites = prefs.getStringList(_favoritesKey) ?? const <String>[];
       if (!settings.saveHistory) recent.clear();
       if (!mounted) return;
       setState(() {
         _settings = settings;
         _recent = recent;
+        _library = libraryJson.whereType<Map>().map(_itemFromJson).toList();
+        _favorites = favorites.toSet();
         _loading = false;
       });
     } catch (_) {
       if (mounted) setState(() => _loading = false);
     }
+  }
+
+  MediaItem _itemFromJson(Map<dynamic, dynamic> entry) => MediaItem(
+    name: entry['name'] as String? ?? '视频',
+    url: entry['url'] as String? ?? '',
+    size: entry['size'] as int? ?? 0,
+    modified: DateTime.tryParse(entry['modified'] as String? ?? ''),
+    isLocal: true,
+  );
+
+  Map<String, Object?> _itemToJson(MediaItem item) => {
+    'name': item.name,
+    'url': item.url,
+    'size': item.size,
+    'modified': item.modified?.toIso8601String(),
+  };
+
+  Future<void> _saveLibrary() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(
+      _libraryKey,
+      jsonEncode(_library.map(_itemToJson).toList()),
+    );
+    await prefs.setStringList(_favoritesKey, _favorites.toList());
   }
 
   Future<void> _saveHistory() async {
@@ -106,13 +139,22 @@ class _HomeScreenState extends State<HomeScreen> {
           'flv',
           'wmv',
           'ogv',
+          'vob',
+          'rmvb',
+          'mp3',
+          'm4a',
+          'aac',
+          'flac',
+          'wav',
+          'ogg',
+          'opus',
         ],
       );
       if (files.isEmpty) return;
       final items = <MediaItem>[];
       for (final file in files) {
-        final path = kIsWeb ? file.uri.toString() : file.path;
-        if (path == null || path.isEmpty) continue;
+        final path = file.path ?? file.uri.toString();
+        if (path.isEmpty) continue;
         items.add(
           MediaItem(
             name: file.name,
@@ -127,6 +169,7 @@ class _HomeScreenState extends State<HomeScreen> {
         _message('读取文件失败，请重新选择');
         return;
       }
+      await _addToLibrary(items);
       await _remember(items);
       await _launchPlayer(items, 0);
     } catch (error) {
@@ -149,6 +192,7 @@ class _HomeScreenState extends State<HomeScreen> {
         _message('这个文件夹中没有找到支持的视频');
         return;
       }
+      await _addToLibrary(found);
       await _remember(found);
       await _launchPlayer(found, 0);
     } catch (error) {
@@ -157,6 +201,117 @@ class _HomeScreenState extends State<HomeScreen> {
       if (mounted) setState(() => _scanning = false);
     }
   }
+
+  Future<void> _addToLibrary(List<MediaItem> items) async {
+    final unique = <String>{};
+    _library = [
+      ...items,
+      ..._library,
+    ].where((item) => unique.add(item.url)).take(500).toList();
+    if (mounted) setState(() {});
+    await _saveLibrary();
+  }
+
+  List<MediaItem> get _visibleLibrary {
+    final query = _librarySearch.text.trim().toLowerCase();
+    final items = _library.where((item) {
+      if (_libraryFilter == '收藏' && !_favorites.contains(item.url)) {
+        return false;
+      }
+      if (_libraryFilter == '视频' && !item.isVideo) return false;
+      if (_libraryFilter == '音频' && !item.isAudio) return false;
+      return query.isEmpty ||
+          item.name.toLowerCase().contains(query) ||
+          item.url.toLowerCase().contains(query);
+    }).toList();
+    if (_librarySort == '名称') {
+      items.sort(
+        (a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()),
+      );
+    } else if (_librarySort == '文件大小') {
+      items.sort((a, b) => b.size.compareTo(a.size));
+    }
+    return items;
+  }
+
+  Future<void> _openLibraryItem(MediaItem item) async {
+    final queue = _visibleLibrary;
+    final index = queue.indexWhere((candidate) => candidate.url == item.url);
+    await _remember([item]);
+    await _launchPlayer(queue, index < 0 ? 0 : index);
+  }
+
+  Future<void> _toggleFavorite(MediaItem item) async {
+    setState(() {
+      if (!_favorites.add(item.url)) _favorites.remove(item.url);
+    });
+    await _saveLibrary();
+  }
+
+  Future<void> _removeFromLibrary(MediaItem item) async {
+    setState(() {
+      _library.removeWhere((entry) => entry.url == item.url);
+      _favorites.remove(item.url);
+    });
+    await _saveLibrary();
+  }
+
+  Future<void> _showMediaInfo(MediaItem item) async {
+    await showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: Colors.white,
+      showDragHandle: true,
+      builder: (context) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(20, 4, 20, 28),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                item.name,
+                style: const TextStyle(
+                  fontSize: 17,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+              const SizedBox(height: 15),
+              _infoLine('格式', item.extension.toUpperCase()),
+              _infoLine('大小', item.prettySize),
+              _infoLine('位置', item.url),
+              if (item.modified != null)
+                _infoLine(
+                  '修改时间',
+                  item.modified!.toLocal().toString().split('.').first,
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _infoLine(String label, String value) => Padding(
+    padding: const EdgeInsets.only(bottom: 10),
+    child: Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        SizedBox(
+          width: 70,
+          child: Text(
+            label,
+            style: const TextStyle(color: Color(0xFF828A80), fontSize: 12),
+          ),
+        ),
+        Expanded(
+          child: SelectableText(
+            value,
+            style: const TextStyle(color: _ink, fontSize: 12),
+          ),
+        ),
+      ],
+    ),
+  );
 
   Future<void> _remember(List<MediaItem> items) async {
     final next = [...items, ..._recent];
@@ -187,6 +342,8 @@ class _HomeScreenState extends State<HomeScreen> {
         ),
       ),
     );
+    final refreshedSettings = await PlayerSettings.load();
+    if (mounted) setState(() => _settings = refreshedSettings);
   }
 
   Future<void> _loadSettingsOnly() async {
@@ -253,6 +410,8 @@ class _HomeScreenState extends State<HomeScreen> {
                   _heroCard(),
                   const SizedBox(height: 24),
                   _quickActions(),
+                  const SizedBox(height: 27),
+                  _librarySection(),
                   const SizedBox(height: 30),
                   _recentHeader(),
                   const SizedBox(height: 10),
@@ -454,6 +613,232 @@ class _HomeScreenState extends State<HomeScreen> {
       padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 10),
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
       textStyle: const TextStyle(fontSize: 11, fontWeight: FontWeight.w700),
+    ),
+  );
+
+  Widget _librarySection() {
+    final items = _visibleLibrary;
+    final limit = _showAllLibrary ? 500 : 6;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            const Text(
+              '本地媒体库',
+              style: TextStyle(
+                color: _ink,
+                fontSize: 16,
+                fontWeight: FontWeight.w800,
+              ),
+            ),
+            const SizedBox(width: 7),
+            Text(
+              '${_library.length}',
+              style: const TextStyle(color: Color(0xFF8A9288), fontSize: 11),
+            ),
+            const Spacer(),
+            TextButton.icon(
+              onPressed: _openVideos,
+              icon: const Icon(Icons.add_rounded, size: 17),
+              label: const Text('添加媒体'),
+              style: TextButton.styleFrom(foregroundColor: _ink),
+            ),
+          ],
+        ),
+        const SizedBox(height: 7),
+        TextField(
+          controller: _librarySearch,
+          onChanged: (_) => setState(() => _showAllLibrary = false),
+          decoration: InputDecoration(
+            hintText: '搜索名称或文件路径',
+            prefixIcon: const Icon(Icons.search_rounded, size: 19),
+            filled: true,
+            fillColor: Colors.white,
+            contentPadding: const EdgeInsets.symmetric(vertical: 12),
+            border: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(15),
+              borderSide: BorderSide.none,
+            ),
+          ),
+        ),
+        const SizedBox(height: 8),
+        SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          child: Row(
+            children: ['全部', '视频', '音频', '收藏'].map((filter) {
+              final selected = _libraryFilter == filter;
+              return Padding(
+                padding: const EdgeInsets.only(right: 7),
+                child: ChoiceChip(
+                  label: Text(filter),
+                  selected: selected,
+                  onSelected: (_) => setState(() => _libraryFilter = filter),
+                  selectedColor: _green,
+                  backgroundColor: Colors.white,
+                  side: BorderSide.none,
+                  labelStyle: TextStyle(
+                    color: _ink,
+                    fontSize: 10,
+                    fontWeight: selected ? FontWeight.w800 : FontWeight.w500,
+                  ),
+                ),
+              );
+            }).toList(),
+          ),
+        ),
+        Row(
+          children: [
+            Text(
+              '${items.length} 项',
+              style: const TextStyle(color: Color(0xFF8A9288), fontSize: 10),
+            ),
+            const Spacer(),
+            const Text(
+              '排序',
+              style: TextStyle(color: Color(0xFF8A9288), fontSize: 10),
+            ),
+            const SizedBox(width: 7),
+            DropdownButton<String>(
+              value: _librarySort,
+              underline: const SizedBox.shrink(),
+              isDense: true,
+              borderRadius: BorderRadius.circular(12),
+              items: const ['最近添加', '名称', '文件大小']
+                  .map(
+                    (sort) => DropdownMenuItem(value: sort, child: Text(sort)),
+                  )
+                  .toList(),
+              onChanged: (value) {
+                if (value != null) setState(() => _librarySort = value);
+              },
+            ),
+          ],
+        ),
+        if (_library.isEmpty)
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.symmetric(vertical: 22, horizontal: 17),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(17),
+            ),
+            child: const Text(
+              '添加视频后会保存在媒体库中，支持搜索、收藏和继续播放。',
+              style: TextStyle(color: Color(0xFF737D72), fontSize: 11),
+            ),
+          )
+        else if (items.isEmpty)
+          const Padding(
+            padding: EdgeInsets.symmetric(vertical: 20),
+            child: Center(
+              child: Text(
+                '没有匹配的媒体',
+                style: TextStyle(color: Color(0xFF858D83), fontSize: 12),
+              ),
+            ),
+          )
+        else
+          ...items.take(limit).map(_libraryRow),
+        if (items.length > 6)
+          Center(
+            child: TextButton(
+              onPressed: () =>
+                  setState(() => _showAllLibrary = !_showAllLibrary),
+              child: Text(_showAllLibrary ? '收起' : '显示全部 ${items.length} 项'),
+            ),
+          ),
+      ],
+    );
+  }
+
+  Widget _libraryRow(MediaItem item) => Padding(
+    padding: const EdgeInsets.only(bottom: 6),
+    child: Material(
+      color: Colors.white,
+      borderRadius: BorderRadius.circular(15),
+      child: InkWell(
+        onTap: () => _openLibraryItem(item),
+        borderRadius: BorderRadius.circular(15),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(10, 9, 4, 9),
+          child: Row(
+            children: [
+              Container(
+                width: 44,
+                height: 44,
+                decoration: BoxDecoration(
+                  color: const Color(0xFFF0F4EA),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Icon(
+                  item.isAudio
+                      ? Icons.music_note_rounded
+                      : Icons.movie_outlined,
+                  color: const Color(0xFF617E48),
+                  size: 21,
+                ),
+              ),
+              const SizedBox(width: 11),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      item.name,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: _ink,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      '${item.extension.toUpperCase()} · ${item.prettySize}',
+                      style: const TextStyle(
+                        color: Color(0xFF8A9288),
+                        fontSize: 10,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              IconButton(
+                tooltip: _favorites.contains(item.url) ? '取消收藏' : '收藏',
+                onPressed: () => _toggleFavorite(item),
+                visualDensity: VisualDensity.compact,
+                icon: Icon(
+                  _favorites.contains(item.url)
+                      ? Icons.favorite_rounded
+                      : Icons.favorite_border_rounded,
+                  color: _favorites.contains(item.url)
+                      ? const Color(0xFFB04C42)
+                      : const Color(0xFF8A9288),
+                  size: 19,
+                ),
+              ),
+              PopupMenuButton<String>(
+                tooltip: '更多操作',
+                onSelected: (action) {
+                  if (action == 'info') _showMediaInfo(item);
+                  if (action == 'remove') _removeFromLibrary(item);
+                },
+                itemBuilder: (_) => const [
+                  PopupMenuItem(value: 'info', child: Text('媒体信息')),
+                  PopupMenuItem(value: 'remove', child: Text('从媒体库移除')),
+                ],
+                icon: const Icon(
+                  Icons.more_vert_rounded,
+                  color: Color(0xFF8A9288),
+                  size: 19,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
     ),
   );
 

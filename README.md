@@ -4,10 +4,11 @@ A Flutter video player for watching videos stored on your device, with WebDAV as
 
 ## Features
 
-- Mobile-first home screen for opening and playing local video files.
-- Select multiple videos to create a playback queue, scan a local folder, and reopen recent files.
-- Player controls for seeking, 10-second jumps, speed (0.25x–4x), aspect ratio, queue navigation, and immersive landscape playback.
-- Settings for fullscreen rotation, hiding system bars, auto-hiding controls, default speed, and local playback history.
+- Persistent local media library with multi-file import, search, video/audio filters, sorting, favorites, and file details.
+- Continue watching from saved positions, manage recent files, and play the next item or loop the current queue.
+- Player gestures for double-tap skipping, drag-to-seek, temporary 2x speed, and volume adjustment; configurable skip interval.
+- External SRT/VTT subtitles with timing adjustment and font sizing, plus speed (0.25x–4x), aspect ratio, queue controls, fullscreen landscape playback, and sleep timer.
+- Settings for fullscreen rotation, hiding system bars, auto-hiding controls, default speed, resume behavior, auto-next, loop mode, subtitle sizing, and history.
 - Browse a WebDAV server and play supported video or audio files when you choose the optional WebDAV source.
 - Android, iOS, Windows, macOS, Linux, and Web targets. Playback support depends on the target platform and media format.
 
@@ -43,5 +44,5 @@ For Web builds, the WebDAV server must allow cross-origin requests from the app 
 
 ## Current scope
 
-The local library uses the system file picker and can scan a selected folder on Windows, macOS, and Linux. Android and iOS use the system file picker to select videos. Folder scanning is not available on mobile or in the Web build. WebDAV credentials remain in memory and are not saved. Subtitle and audio track selection, picture-in-picture, and background playback are not included yet.
+The local library uses the system file picker and can scan a selected folder on Windows, macOS, and Linux. Android and iOS use the system file picker to select videos; folder scanning is not available on mobile or in the Web build. External subtitle files are supported; embedded audio/subtitle track switching, picture-in-picture, and background playback are not included yet. WebDAV credentials remain in memory and are not saved.
 

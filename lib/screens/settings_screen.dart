@@ -120,6 +120,135 @@ class _SettingsScreenState extends State<SettingsScreen> {
               ],
             ),
           ),
+          _divider,
+          _switchRow(
+            title: '记住播放进度',
+            subtitle: '下次打开视频时可从上次位置继续',
+            icon: Icons.bookmark_outline_rounded,
+            value: _settings.rememberPosition,
+            onChanged: (value) =>
+                _update(_settings.copyWith(rememberPosition: value)),
+          ),
+          _divider,
+          _switchRow(
+            title: '自动播放下一条',
+            subtitle: '当前视频结束后继续播放队列中的下一条',
+            icon: Icons.skip_next_rounded,
+            value: _settings.autoPlayNext,
+            onChanged: (value) =>
+                _update(_settings.copyWith(autoPlayNext: value)),
+          ),
+          _divider,
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
+            child: Row(
+              children: [
+                const Icon(Icons.replay_rounded, color: _ink, size: 20),
+                const SizedBox(width: 13),
+                const Expanded(
+                  child: Text(
+                    '循环模式',
+                    style: TextStyle(
+                      color: _ink,
+                      fontSize: 14,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ),
+                DropdownButton<int>(
+                  value: _settings.repeatMode,
+                  underline: const SizedBox.shrink(),
+                  borderRadius: BorderRadius.circular(14),
+                  items: const [
+                    DropdownMenuItem(value: 0, child: Text('不循环')),
+                    DropdownMenuItem(value: 1, child: Text('列表循环')),
+                    DropdownMenuItem(value: 2, child: Text('单曲循环')),
+                  ],
+                  onChanged: (value) {
+                    if (value != null) {
+                      _update(_settings.copyWith(repeatMode: value));
+                    }
+                  },
+                ),
+              ],
+            ),
+          ),
+          _divider,
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
+            child: Row(
+              children: [
+                const Icon(Icons.replay_10_rounded, color: _ink, size: 20),
+                const SizedBox(width: 13),
+                const Expanded(
+                  child: Text(
+                    '双击快进/快退',
+                    style: TextStyle(
+                      color: _ink,
+                      fontSize: 14,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ),
+                DropdownButton<int>(
+                  value: _settings.seekSeconds,
+                  underline: const SizedBox.shrink(),
+                  borderRadius: BorderRadius.circular(14),
+                  items: const [5, 10, 15, 30]
+                      .map(
+                        (seconds) => DropdownMenuItem(
+                          value: seconds,
+                          child: Text('$seconds秒'),
+                        ),
+                      )
+                      .toList(),
+                  onChanged: (value) {
+                    if (value != null) {
+                      _update(_settings.copyWith(seekSeconds: value));
+                    }
+                  },
+                ),
+              ],
+            ),
+          ),
+          _divider,
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    const Icon(Icons.subtitles_outlined, color: _ink, size: 20),
+                    const SizedBox(width: 13),
+                    const Expanded(
+                      child: Text(
+                        '字幕字号',
+                        style: TextStyle(
+                          color: _ink,
+                          fontSize: 14,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ),
+                    Text(
+                      '${_settings.subtitleFontSize.round()} px',
+                      style: const TextStyle(color: Color(0xFF7E867D)),
+                    ),
+                  ],
+                ),
+                Slider(
+                  min: 14,
+                  max: 32,
+                  divisions: 9,
+                  value: _settings.subtitleFontSize.clamp(14, 32).toDouble(),
+                  activeColor: _ink,
+                  onChanged: (value) =>
+                      _update(_settings.copyWith(subtitleFontSize: value)),
+                ),
+              ],
+            ),
+          ),
         ]),
         const SizedBox(height: 24),
         _sectionTitle('媒体库'),
