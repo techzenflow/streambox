@@ -4,13 +4,15 @@ class MediaItem {
       required this.url,
       required this.size,
       required this.modified,
-      this.isDirectory = false});
+      this.isDirectory = false,
+      this.isLocal = false});
 
   final String name;
   final String url;
   final int size;
   final DateTime? modified;
   final bool isDirectory;
+  final bool isLocal;
 
   String get extension =>
       name.contains('.') ? name.split('.').last.toLowerCase() : '';

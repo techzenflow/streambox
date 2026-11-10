@@ -1,8 +1,17 @@
 import 'package:flutter/material.dart';
+import 'package:video_player_media_kit/video_player_media_kit.dart';
 
 import 'screens/home_screen.dart';
 
 void main() {
+  VideoPlayerMediaKit.ensureInitialized(
+    android: true,
+    iOS: true,
+    macOS: true,
+    windows: true,
+    linux: true,
+    web: true,
+  );
   runApp(const StreamboxApp());
 }
 
