@@ -11,6 +11,14 @@ flutter run -d chrome
 
 Flutter runner projects are included for Android, iOS, Web, Windows, macOS, and Linux. Run with the target device available in `flutter devices`.
 
+## Releases
+
+- Every push to `main` builds an Android APK and publishes a versioned GitHub **pre-release**, such as `v1.0.0-beta.12`. GitHub generates notes from the changes since the previous release.
+- A stable Android release is published by pushing a version tag such as `v1.0.0`. Stable releases are separate from beta releases and are not replaced by beta builds.
+- Download APKs from [GitHub Releases](https://github.com/techzenflow/streambox/releases).
+
+The APK's version name matches its release tag (without the leading `v`). Its Android build number is the GitHub Actions run number.
+
 ## Connect a WebDAV server
 
 Enter the server's WebDAV root URL, then its username and password. The app uses `PROPFIND` with `Depth: 1` to browse folders and sends Basic authentication for requests. Video and audio playback is provided by `video_player` and depends on the codecs supported by the target platform.

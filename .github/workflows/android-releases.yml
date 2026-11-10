@@ -1,0 +1,113 @@
+name: Android releases
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  beta:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Set up Java
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: 3.38.5
+          cache: true
+
+      - name: Resolve dependencies
+        run: flutter pub get
+
+      - name: Set beta version
+        id: version
+        shell: bash
+        run: |
+          base_version="$(sed -n 's/^version: *\([0-9][^+ ]*\).*/\1/p' pubspec.yaml | head -n 1)"
+          base_version="${base_version%%-*}"
+          beta_version="${base_version}-beta.${GITHUB_RUN_NUMBER}"
+          echo "version=${beta_version}" >> "$GITHUB_OUTPUT"
+          echo "tag=v${beta_version}" >> "$GITHUB_OUTPUT"
+
+      - name: Build beta APK
+        run: flutter build apk --release --build-name='${{ steps.version.outputs.version }}' --build-number='${{ github.run_number }}'
+
+      - name: Publish beta pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          gh release create "$RELEASE_TAG" build/app/outputs/flutter-apk/app-release.apk \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "Streambox ${RELEASE_VERSION} (Beta)" \
+            --generate-notes \
+            --prerelease
+
+  stable:
+    if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref, '-beta.')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.ref }}
+
+      - name: Set up Java
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: 3.38.5
+          cache: true
+
+      - name: Resolve dependencies
+        run: flutter pub get
+
+      - name: Validate stable version tag
+        shell: bash
+        run: |
+          if [[ ! "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Stable tags must use vMAJOR.MINOR.PATCH (for example, v1.0.0)."
+            exit 1
+          fi
+
+      - name: Build stable APK
+        run: flutter build apk --release --build-name="${GITHUB_REF_NAME#v}" --build-number='${{ github.run_number }}'
+
+      - name: Publish stable release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" build/app/outputs/flutter-apk/app-release.apk \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "Streambox $GITHUB_REF_NAME" \
+            --generate-notes
